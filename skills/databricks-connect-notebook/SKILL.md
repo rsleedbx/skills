@@ -81,7 +81,7 @@ auth_type             = databricks-cli
 |-----------|-------------------------------|
 | **Databricks Connect** (`DatabricksSession`) | Reads `host` + OAuth token automatically |
 | **Databricks SDK** (`WorkspaceClient()`) | Reads the same file; `w.config.authenticate()` returns a fresh Bearer token |
-| **ZeroBus ingest** (`IngestConfig.from_workspace_client()`) | Uses `WorkspaceClient` to get the token; no service principal needed |
+| **ZeroBus ingest** (in **[zerobusdemo](https://github.com/rsleedbx/zerobusdemo)**) | `IngestConfig.from_workspace_client()` uses `WorkspaceClient`; no service principal needed |
 
 ---
 
@@ -96,7 +96,7 @@ cd <repo_root>
 
 Confirmed working output (DatabricksSession on serverless):
 ```
-Project root: /Users/robert.lee/github/zerobus
+Project root: <repo_root> (e.g. statschema or zerobusdemo)
 Spark: DatabricksSession (remote)
 Loaded 4 table(s): ['actor', 'category', 'country', 'city']
 actor: 1000 rows, 6 columns
@@ -117,7 +117,7 @@ The script tries Spark in priority order:
 ```bash
 .venv_3_11/bin/pip install -r requirements-dev.txt  # once (adds pytest to the Connect venv)
 .venv_3_11/bin/python -m pytest tests/ -q
-# → all passed, 2 skipped  (2 skips = integration tests needing real ZeroBus endpoint)
+# → all passed (skipped tests = live DB / Connect-dependent; see docs/testing.md)
 # requires ~/.databrickscfg
 ```
 
@@ -127,7 +127,7 @@ The script tries Spark in priority order:
 python -m venv .venv_test
 .venv_test/bin/pip install -r requirements-test.txt
 .venv_test/bin/python -m pytest tests/ -q
-# → 176 passed, 2 skipped
+# → most tests pass; live-DB tests skip when ports closed
 ```
 
 ### 3. Read the notebook file to see the user's errors
@@ -163,24 +163,21 @@ print("Project root:", root)
 
 ---
 
-## ZeroBus Ingest Auth (No Service Principal Needed)
+## ZeroBus Ingest (zerobusdemo repo)
 
-Use `WorkspaceClient` from `databricks-sdk` — same `~/.databrickscfg` as Connect:
+Use `WorkspaceClient` from `databricks-sdk` — same `~/.databrickscfg` as Connect. Code lives in **[zerobusdemo](https://github.com/rsleedbx/zerobusdemo)**:
 
 ```python
-from src.zerobus_ingest import IngestConfig, ingest_dataframe
+from src.zbhelper.zerobus_ingest import IngestConfig, ingest_dataframe
 
-# Session OAuth — WorkspaceClient handles token refresh
 config = IngestConfig.from_workspace_client("main.default.my_table")
-
-# Short-lived PAT (auto-expires in 5 min, no cleanup needed) — useful for tests
 config = IngestConfig.from_workspace_client("main.default.my_table", lifetime_seconds=300)
 
 result = ingest_dataframe(df, table, config)
 print(f"Ingested {result.rows_sent} rows")
 ```
 
-Only `ZEROBUS_SERVER_ENDPOINT` is required (see `docs/implementation.md § ZeroBus Endpoint Format`).
+See zerobusdemo `README.md` and `docs/faq/` for endpoint format and env vars.
 
 ---
 

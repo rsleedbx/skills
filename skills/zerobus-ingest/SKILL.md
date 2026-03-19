@@ -7,13 +7,17 @@ description: Implement and test Databricks ZeroBus Ingest — stream Protobuf-se
 
 ZeroBus is a Databricks serverless gRPC ingestion API that writes Protobuf-encoded records directly into Unity Catalog Delta tables at high throughput.
 
-## Key files in this repo
+## Where the code lives
 
-| File | Role |
+ZeroBus helpers were moved out of **statschema** into **[zerobusdemo](https://github.com/rsleedbx/zerobusdemo)**.
+
+| File (in zerobusdemo) | Role |
 |------|------|
-| `src/zerobus_ingest.py` | `IngestConfig`, `ingest_dataframe`, `build_zerobus_endpoint` |
-| `src/protobuf_converter.py` | Schema → `.proto` → compiled message class → bytes |
+| `src/zbhelper/zerobus_ingest.py` | `IngestConfig`, `ingest_dataframe`, `build_zerobus_endpoint` |
+| `src/zbhelper/protobuf_converter.py` | Schema → `.proto` → compiled message class → bytes |
 | `tests/test_zerobus_ingest.py` | Unit + integration tests |
+
+Canonical schema types come from `src/statschema/model.py` in that repo (bundled copy of statschema).
 
 ---
 
@@ -42,7 +46,7 @@ zerobus:    https://6051921418418893.zerobus.e2-dogfood.staging.cloud.databricks
 ### `build_zerobus_endpoint` utility
 
 ```python
-from src.zerobus_ingest import build_zerobus_endpoint
+from src.zbhelper.zerobus_ingest import build_zerobus_endpoint
 
 endpoint = build_zerobus_endpoint()
 print(endpoint)  # https://6051921418418893.zerobus.e2-dogfood.staging.cloud.databricks.com
@@ -57,7 +61,7 @@ The table name passed to `IngestConfig` must be fully qualified: `catalog.schema
 Use `build_qualified_table_name` to construct it automatically:
 
 ```python
-from src.zerobus_ingest import build_qualified_table_name
+from src.zbhelper.zerobus_ingest import build_qualified_table_name
 
 # Bare table name — derives schema from current user email (robert.lee@ -> robert_lee)
 fqn = build_qualified_table_name("orders")
@@ -83,7 +87,7 @@ Schema derivation: `robert.lee@databricks.com` → `robert_lee` (strip domain, r
 Uses `~/.databrickscfg` — same credentials as Databricks Connect. No service principal needed. Endpoint and table name are both auto-constructed.
 
 ```python
-from src.zerobus_ingest import IngestConfig, ingest_dataframe, build_qualified_table_name
+from src.zbhelper.zerobus_ingest import IngestConfig, ingest_dataframe, build_qualified_table_name
 
 table_fqn = build_qualified_table_name("orders")   # main.robert_lee.orders
 config = IngestConfig.from_workspace_client(table_fqn)
@@ -107,8 +111,8 @@ config = IngestConfig.from_env(table_name="main.default.my_table")
 ## Ingesting a DataFrame
 
 ```python
-from src.zerobus_ingest import ingest_dataframe
-from src.schema_parser.model import CanonicalTableSchema, CanonicalColumn
+from src.zbhelper.zerobus_ingest import ingest_dataframe
+from src.statschema.model import CanonicalTableSchema, CanonicalColumn
 
 table = CanonicalTableSchema(
     name="orders",
@@ -146,7 +150,7 @@ Before calling `ingest_dataframe`:
 
 ### Unit tests (no credentials, mock the SDK)
 
-ZeroBus SDK names are imported at module level in `zerobus_ingest.py` so `patch.multiple` can replace them. Also patch `build_zerobus_endpoint` to avoid real SDK calls:
+ZeroBus SDK names are imported at module level in `zbhelper/zerobus_ingest.py` so `patch.multiple` can replace them. Also patch `build_zerobus_endpoint` to avoid real SDK calls:
 
 ```python
 from unittest.mock import MagicMock, patch
@@ -159,9 +163,9 @@ mock_sdk_instance.create_stream_with_headers_provider.return_value = mock_stream
 class MockRecordType:
     PROTO = "PROTO"
 
-with patch("src.zerobus_ingest._host_from_workspace_client", return_value="https://ws"), \
-     patch("src.zerobus_ingest.build_zerobus_endpoint", return_value="https://123.zerobus.ws.databricks.com"), \
-     patch.multiple("src.zerobus_ingest",
+with patch("src.zbhelper.zerobus_ingest._host_from_workspace_client", return_value="https://ws"), \
+     patch("src.zbhelper.zerobus_ingest.build_zerobus_endpoint", return_value="https://123.zerobus.ws.databricks.com"), \
+     patch.multiple("src.zbhelper.zerobus_ingest",
          ZerobusSdk=MagicMock(return_value=mock_sdk_instance),
          TableProperties=MagicMock(),
          StreamConfigurationOptions=MagicMock(),
@@ -186,7 +190,7 @@ export ZEROBUS_TABLE_NAME=main.default.my_table
 
 - **`HeadersProvider.__new__() takes 0 positional arguments`** — Rust Pyo3 `__new__` rejects forwarded args. Fix: `def __new__(cls, *a, **kw): return HeadersProvider.__new__(cls)`. Applied in `DatabricksSdkHeadersProvider`.
 
-- **`AttributeError: module has no attribute 'ZerobusSdk'` in mock** — ZeroBus imports must be at module level, not inside functions. Already fixed in `zerobus_ingest.py`.
+- **`AttributeError: module has no attribute 'ZerobusSdk'` in mock** — ZeroBus imports must be at module level, not inside functions. Already fixed in `zbhelper/zerobus_ingest.py`.
 
 - **Rows ingested but not visible** — `flush()` must be called before `close()`. `ingest_dataframe` does this in a `finally` block.
 
