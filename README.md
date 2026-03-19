@@ -2,11 +2,15 @@
 
 Shared Cursor AI configuration — skills and rules used across multiple repos.
 
+**Published at:** [github.com/rsleedbx/skills](https://github.com/rsleedbx/skills)
+
+Used as `.cursor` in **[statschema](https://github.com/rsleedbx/statschema)** and **[zerobusdemo](https://github.com/rsleedbx/zerobusdemo)** (and others).
+
 ## Usage as a git submodule
 
 Add to a repo:
 ```bash
-git submodule add https://github.com/robert-lee/cursor-config .cursor
+git submodule add https://github.com/rsleedbx/skills .cursor
 git commit -m "Add shared Cursor config as submodule"
 ```
 
