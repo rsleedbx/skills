@@ -1,0 +1,6 @@
+# Cursor writes these locally when the submodule is checked out as .cursor/
+# They are machine-specific and must never be committed.
+projects/
+*.log
+worktrees.json
+mcp.json
