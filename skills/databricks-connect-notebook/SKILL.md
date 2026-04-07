@@ -16,6 +16,19 @@ description: Create and test Python notebooks that use Databricks Connect (spark
 
 The **Spark session** is **provided by Databricks Connect itself**. Do not call `SparkSession.builder` in the notebook. With the Databricks extension or a kernel that uses `databricks-connect`, the session is injected as `spark` (and `dbutils`).
 
+**Both `spark` and `dbutils` are available locally with Databricks Connect** — `dbutils` is `databricks.sdk.dbutils.RemoteDbUtils`, which supports secrets, widgets, fs, and notebook context. It behaves identically to `dbutils` inside a Databricks workspace notebook.
+
+```python
+# Locally with Databricks Connect — both are available:
+print(spark)    # <pyspark.sql.connect.session.SparkSession ...>
+print(dbutils)  # <databricks.sdk.dbutils.RemoteDbUtils ...>
+
+# dbutils.secrets works locally too:
+val = dbutils.secrets.get(scope="my-scope", key="my-key")
+```
+
+`NameError: name 'dbutils' is not defined` only occurs in a **plain Python environment with no Databricks context** (no Connect, no workspace). It does NOT indicate a local/Connect environment.
+
 ```python
 # In cell 1 – no SparkSession.builder
 print(spark)
@@ -184,6 +197,7 @@ See zerobusdemo `README.md` and `docs/faq/` for endpoint format and env vars.
 ## Common Pitfalls
 
 - **Creating SparkSession in notebook or `src/`** — Don't. Use the injected `spark`.
+- **Assuming `dbutils` is unavailable locally** — Wrong. Databricks Connect injects both `spark` and `dbutils` (`RemoteDbUtils`) locally. Only use `NameError` as a fallback for plain Python with no Databricks context at all, not for Databricks Connect.
 - **Kernel sees wrong project root** — Re-run the first cell or Run All. The walk-up logic fixes it.
 - **`ModuleNotFoundError: No module named 'jmespath'` (or `numpy`, `pandas`)** — The kernel's venv is missing deps. Run: `.venv_3_11/bin/pip install -r requirements.txt`
 - **`AssertionError: colType is not instance of DataType`** — `dbldatagen` needs instances (`IntegerType()`), not classes (`IntegerType`). Fixed in `dbldatagen_builder.py`.
