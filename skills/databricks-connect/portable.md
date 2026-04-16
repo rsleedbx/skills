@@ -117,17 +117,49 @@ token = read_secret(dbutils, "my-scope", "my-token")
 
 ---
 
-## 5. Importing from `src/` in notebooks
+## 5. Importing helper modules from notebooks
 
-`sys.path.insert(0, ".")` fails when the Jupyter kernel CWD is `notebooks/` rather than the repo root — `zbhelper` lives at `src/zbhelper/`, so `src/` is what must be on the path.
+On a Databricks workspace, `"."` (the notebook's own directory) is always on `sys.path`, but `".."` (the parent) is not. This means a helper package imported by notebooks must be **co-located in the same directory** as the notebooks — not under `src/`.
 
-Walk up from `Path.cwd()` to locate `src/` reliably regardless of CWD:
+**Preferred layout:**
+
+```
+notebooks/
+  zbhelper/          # helper package lives here, next to the notebooks
+    __init__.py
+    ingest_benchmark.py
+  my_notebook.ipynb
+src/
+  statschema/        # packages used by pytest & scripts stay in src/
+```
+
+With this layout, `import zbhelper` in a notebook needs no `sys.path` manipulation on the workspace or locally (when the kernel CWD is `notebooks/`).
+
+For **pytest** to find the package, add `notebooks/` to `sys.path` once in `conftest.py`:
+
+```python
+# conftest.py (repo root)
+import sys
+from pathlib import Path
+
+_notebooks = str(Path(__file__).parent / "notebooks")
+if _notebooks not in sys.path:
+    sys.path.insert(0, _notebooks)
+```
+
+| Situation | `"."` resolves to | `import zbhelper` works? |
+|---|---|---|
+| Workspace notebook | notebook dir = `notebooks/` | ✅ |
+| Local kernel CWD = `notebooks/` | `notebooks/` | ✅ |
+| pytest (via `conftest.py`) | N/A — `conftest.py` adds `notebooks/` | ✅ |
+
+If a package genuinely belongs in `src/` (shared with non-notebook code), use the walk-up fallback instead:
 
 ```python
 import sys
 from pathlib import Path
 
-def _find_src(marker: str = "zbhelper") -> str:
+def _find_src(marker: str = "mypackage") -> str:
     for parent in [Path.cwd(), *Path.cwd().parents]:
         candidate = parent / "src"
         if (candidate / marker).is_dir():
@@ -138,14 +170,6 @@ _src = _find_src()
 if _src not in sys.path:
     sys.path.insert(0, _src)
 ```
-
-| Situation | `"."` resolves to | `_find_src()` resolves to |
-|---|---|---|
-| Kernel CWD = repo root | `repo/` (works by accident) | `repo/src/` ✅ |
-| Kernel CWD = `notebooks/` | `notebooks/` ❌ | `repo/src/` ✅ |
-| Kernel CWD = workspace `/Workspace/…` | workspace dir ❌ | `repo/src/` ✅ |
-
-Change `marker` to whichever package you are importing (e.g. `"statschema"`).
 
 ---
 
