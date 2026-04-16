@@ -1,11 +1,78 @@
 ---
 name: databricks-connect
-description: Set up and test Databricks Connect for local notebooks and Python scripts — spark, dbutils, WorkspaceClient, ~/.databrickscfg auth, GCP workspace URLs, metadata-service conflicts. Use when creating notebooks that run against a remote Databricks workspace, verifying serverless Spark works locally, or debugging auth errors with WorkspaceClient or databricks-connect.
+description: Set up Databricks Connect for local notebooks and .py files — spark/dbutils injection, what runs locally vs remotely, Spark Connect vs Databricks Connect, DatabricksSession, WorkspaceClient auth conflict, GCP URLs. Use when creating notebooks that run against a remote workspace, confused about spark/dbutils availability locally, verifying serverless Spark works, or debugging auth errors.
 ---
 
 # Databricks Connect
 
-Runs `spark` and `dbutils` against a remote Databricks workspace from a local IDE or `.py` file. No cluster needed — uses serverless compute.
+Runs `spark` and `dbutils` from a local IDE (Cursor, VS Code, PyCharm) or `.py` file against a remote Databricks workspace. No cluster needed — uses serverless compute.
+
+---
+
+## Spark Connect vs Databricks Connect
+
+| | Spark Connect | Databricks Connect |
+|---|---|---|
+| What it is | Open-source gRPC protocol in Apache Spark for remote execution | Extension of Spark Connect for Databricks |
+| Transport | Spark unresolved logical plans + Apache Arrow over gRPC | Same, plus Databricks auth, Unity Catalog, dbutils, serverless |
+| Use with Databricks | Base protocol only | **Use this** — it includes all Databricks features |
+
+**TL;DR:** When targeting Databricks, "Spark Connect" and "Databricks Connect" refer to the same library (`databricks-connect`). Databricks Connect *is* Spark Connect with Databricks extensions.
+
+---
+
+## spark and dbutils — just like a workspace notebook
+
+When Databricks Connect is active, `spark` and `dbutils` are **automatically injected** into Jupyter notebooks and Cursor notebooks, exactly as they are in a Databricks workspace notebook.
+
+```python
+# These work out of the box — no import or setup needed in the notebook:
+spark.sql("SELECT current_timestamp()").show()
+dbutils.secrets.get(scope="my-scope", key="my-key")
+dbutils.fs.ls("/mnt/")
+```
+
+The injected objects are remote proxies:
+- `spark` → `pyspark.sql.connect.session.SparkSession` (remote session on Databricks compute)
+- `dbutils` → `databricks.sdk.dbutils.RemoteDbUtils` (proxies to workspace)
+
+**In `.py` files**, injection does not happen automatically. See [test-template.md](test-template.md) for how to get `spark` and `dbutils` in plain Python scripts.
+
+---
+
+## What runs locally vs remotely
+
+| Code | Runs |
+|---|---|
+| Python/Scala logic, loops, local variables | **Locally** on your machine |
+| `spark.sql(...)`, DataFrame transformations | **Remotely** on Databricks serverless compute |
+| `collect()`, `show()`, `toPandas()` | Materialises result locally |
+| UDFs, `foreach`, `foreachBatch` | **Remotely** (serialised and sent to cluster) |
+| `dbutils.secrets`, `dbutils.fs` | **Remotely** via workspace proxy |
+
+This mirrors workspace notebook execution exactly — local Python, remote Spark.
+
+---
+
+## Do not call `SparkSession.builder` in notebooks
+
+`SparkSession.builder` creates a disconnected local Spark session — **not** the remote Databricks session.
+
+```python
+# WRONG — creates a local, disconnected Spark session:
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.getOrCreate()
+
+# RIGHT — in notebooks, use the injected spark variable directly.
+# In .py files, use DatabricksSession:
+from databricks.connect import DatabricksSession
+spark = DatabricksSession.builder.getOrCreate()          # reads ~/.databrickscfg DEFAULT
+spark = DatabricksSession.builder.profile("DEV").getOrCreate()  # explicit profile
+```
+
+Pass `spark` into helper modules; never instantiate `SparkSession` or `DatabricksSession` inside `src/` library code.
+
+---
 
 ## Setup
 
@@ -26,33 +93,16 @@ auth_type             = databricks-cli
 
 ### 2. Install `databricks-connect` in your venv
 
-```bash
-pip install databricks-connect
-```
-
-### 3. Verify (see [test-template.md](test-template.md) for a full test script)
+`databricks-connect` conflicts with `pyspark` — uninstall PySpark first if present.
 
 ```bash
-.venv/bin/python test_databricks_connect.py --profile DEFAULT
+pip uninstall pyspark -y
+pip install "databricks-connect==17.3.*"   # match X.Y to your cluster/runtime version
 ```
 
----
+### 3. Verify
 
-## In Notebooks
-
-**Do not call `SparkSession.builder`** — the session is injected as `spark` and `dbutils` by Databricks Connect.
-
-```python
-# Both are available locally:
-print(spark)    # <pyspark.sql.connect.session.SparkSession ...>
-print(dbutils)  # <databricks.sdk.dbutils.RemoteDbUtils ...>
-
-val = dbutils.secrets.get(scope="my-scope", key="my-key")
-```
-
-`NameError: name 'dbutils' is not defined` only occurs in a plain Python environment with no Databricks context — not in a Databricks Connect environment.
-
-Pass `spark` into helper modules; never instantiate `SparkSession` inside `src/`.
+See [test-template.md](test-template.md) for the full verification script.
 
 ---
 
@@ -63,7 +113,7 @@ Databricks Connect exports `DATABRICKS_AUTH_TYPE=metadata-service`. `WorkspaceCl
 **Fix (pick one):**
 1. Unset before creating the client: `del os.environ["DATABRICKS_AUTH_TYPE"]`
 2. Use explicit profile: `WorkspaceClient(profile="DEFAULT")`
-3. Unset in the shell before launching Jupyter: `unset DATABRICKS_AUTH_TYPE DATABRICKS_METADATA_SERVICE_URL`
+3. Unset in shell before launching Jupyter: `unset DATABRICKS_AUTH_TYPE DATABRICKS_METADATA_SERVICE_URL`
 
 ---
 
@@ -88,7 +138,11 @@ Databricks Connect exports `DATABRICKS_AUTH_TYPE=metadata-service`. `WorkspaceCl
 
 ## Common Pitfalls
 
-- **`SparkSession.builder` in notebook** — don't; use injected `spark`.
-- **`dbutils` assumed unavailable locally** — wrong; Connect injects `RemoteDbUtils`.
-- **`WorkspaceClient()` fails with metadata-service** — unset `DATABRICKS_AUTH_TYPE` (see above).
-- **Wrong project root** — walk up from `Path.cwd()` to find `src/` directory.
+| Mistake | Reality |
+|---|---|
+| `SparkSession.builder` in notebook | Creates local session; use injected `spark` |
+| `dbutils` assumed unavailable locally | Wrong — Connect injects `RemoteDbUtils` |
+| `WorkspaceClient()` fails with metadata-service | Unset `DATABRICKS_AUTH_TYPE` (see above) |
+| `NameError: name 'dbutils'` | Only in plain `.py` without active Connect session; use `databricks.sdk.runtime.dbutils` |
+| `pyspark` installed alongside `databricks-connect` | They conflict — uninstall `pyspark` |
+| Wrong project root | Walk up from `Path.cwd()` to find `src/` directory |
