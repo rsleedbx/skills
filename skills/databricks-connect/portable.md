@@ -152,7 +152,17 @@ src/
   statschema/        # packages used by pytest & scripts stay in src/
 ```
 
-With this layout, `import zbhelper` in a notebook needs no `sys.path` manipulation on the workspace or locally (when the kernel CWD is `notebooks/`).
+On the **workspace** the notebook's own directory is always on `sys.path`, so `import zbhelper` works with no setup. **Locally** (Cursor, VS Code), the Jupyter kernel CWD is typically the repo root, not `notebooks/`, so a one-line probe is needed:
+
+```python
+import sys
+from pathlib import Path
+
+# Try CWD (workspace — notebook dir is CWD) then CWD/notebooks (Cursor — repo root is CWD)
+_nb = next((str(p) for p in [Path.cwd(), Path.cwd() / "notebooks"] if (p / "zbhelper").is_dir()), None)
+if _nb and _nb not in sys.path:
+    sys.path.insert(0, _nb)
+```
 
 For **pytest** to find the package, add `notebooks/` to `sys.path` once in `conftest.py`:
 
