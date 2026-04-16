@@ -155,9 +155,12 @@ src/
 On the **workspace** the notebook's own directory is always on `sys.path`. In **Cursor / VS Code** the kernel CWD is the repo root (workspace folder).
 
 > **Known VS Code Jupyter bug — do not rely on `jupyter.notebookFileRoot`:**
-> Setting `"jupyter.notebookFileRoot": "${fileDirname}"` is silently ignored and the CWD stays at `${workspaceFolder}`. Reported as a regression in extension 2024.4.0 ([vscode-jupyter#15649](https://github.com/microsoft/vscode-jupyter/issues/15649)).
+> Setting `"jupyter.notebookFileRoot": "${fileDirname}"` is silently ignored and the CWD stays at `${workspaceFolder}`. Reported as a regression in extension 2024.4.0, confirmed still broken in 2025.9.1 on both VS Code 1.116.0 and Cursor 3.0.12.
 >
-> **Why it was not fixed:** The maintainer could not reproduce it locally and asked for verbose logs. Reporters went quiet; the issue was auto-closed by a bot after 60 days of inactivity and then locked. It was never marked fixed — just abandoned. Cursor bundles the same Jupyter extension and inherits the bug.
+> - Original closed-stale report: [vscode-jupyter#15649](https://github.com/microsoft/vscode-jupyter/issues/15649)
+> - Active bug report (filed Apr 2026, labelled `bug`): [vscode-jupyter#17376](https://github.com/microsoft/vscode-jupyter/issues/17376)
+>
+> **Why #15649 was not fixed:** The maintainer could not reproduce locally and asked for verbose logs. Reporters went quiet; auto-closed by bot after 60 days and locked. Cursor bundles the same Jupyter extension and inherits the bug.
 
 Use a two-location probe in the notebook instead — checks CWD (workspace) then CWD/notebooks (Cursor):
 
