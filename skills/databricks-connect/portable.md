@@ -154,7 +154,10 @@ src/
 
 On the **workspace** the notebook's own directory is always on `sys.path`. In **Cursor / VS Code** the kernel CWD is the repo root (workspace folder).
 
-> **Known bug:** `jupyter.notebookFileRoot: "${fileDirname}"` is silently ignored since Jupyter extension 2024.4.0 ([vscode-jupyter#15649](https://github.com/microsoft/vscode-jupyter/issues/15649)). Do not rely on it.
+> **Known VS Code Jupyter bug — do not rely on `jupyter.notebookFileRoot`:**
+> Setting `"jupyter.notebookFileRoot": "${fileDirname}"` is silently ignored and the CWD stays at `${workspaceFolder}`. Reported as a regression in extension 2024.4.0 ([vscode-jupyter#15649](https://github.com/microsoft/vscode-jupyter/issues/15649)).
+>
+> **Why it was not fixed:** The maintainer could not reproduce it locally and asked for verbose logs. Reporters went quiet; the issue was auto-closed by a bot after 60 days of inactivity and then locked. It was never marked fixed — just abandoned. Cursor bundles the same Jupyter extension and inherits the bug.
 
 Use a two-location probe in the notebook instead — checks CWD (workspace) then CWD/notebooks (Cursor):
 
@@ -162,6 +165,7 @@ Use a two-location probe in the notebook instead — checks CWD (workspace) then
 import sys
 from pathlib import Path
 
+# CWD = notebook dir on workspace; CWD = repo root in Cursor (notebookFileRoot bug).
 _nb = next((str(p) for p in [Path.cwd(), Path.cwd() / "notebooks"] if (p / "zbhelper").is_dir()), None)
 if _nb and _nb not in sys.path:
     sys.path.insert(0, _nb)
