@@ -117,7 +117,39 @@ token = read_secret(dbutils, "my-scope", "my-token")
 
 ---
 
-## 5. `dbutils` options in `.py` files
+## 5. Importing from `src/` in notebooks
+
+`sys.path.insert(0, ".")` fails when the Jupyter kernel CWD is `notebooks/` rather than the repo root — `zbhelper` lives at `src/zbhelper/`, so `src/` is what must be on the path.
+
+Walk up from `Path.cwd()` to locate `src/` reliably regardless of CWD:
+
+```python
+import sys
+from pathlib import Path
+
+def _find_src(marker: str = "zbhelper") -> str:
+    for parent in [Path.cwd(), *Path.cwd().parents]:
+        candidate = parent / "src"
+        if (candidate / marker).is_dir():
+            return str(candidate)
+    raise RuntimeError(f"Cannot find src/{marker} — run from within the repo")
+
+_src = _find_src()
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+```
+
+| Situation | `"."` resolves to | `_find_src()` resolves to |
+|---|---|---|
+| Kernel CWD = repo root | `repo/` (works by accident) | `repo/src/` ✅ |
+| Kernel CWD = `notebooks/` | `notebooks/` ❌ | `repo/src/` ✅ |
+| Kernel CWD = workspace `/Workspace/…` | workspace dir ❌ | `repo/src/` ✅ |
+
+Change `marker` to whichever package you are importing (e.g. `"statschema"`).
+
+---
+
+## 6. `dbutils` options in `.py` files
 
 ```python
 # Option A — via DBUtils constructor (pairs naturally with DatabricksSession)
@@ -137,7 +169,7 @@ Option A is preferred when `spark` is already created by the bootstrap guard. Op
 
 ---
 
-## 6. Why this matters
+## 7. Why this matters
 
 | Pattern | Workspace notebook | Local .py (Connect) |
 |---|---|---|
