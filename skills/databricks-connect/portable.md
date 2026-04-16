@@ -152,16 +152,23 @@ src/
   statschema/        # packages used by pytest & scripts stay in src/
 ```
 
-On the **workspace** the notebook's own directory is always on `sys.path`, so `import zbhelper` works with no setup. **Locally** (Cursor, VS Code), the Jupyter kernel CWD is typically the repo root, not `notebooks/`, so a one-line probe is needed:
+On the **workspace** the notebook's own directory is always on `sys.path`. In **Cursor / VS Code** the kernel CWD defaults to the repo root — fix this once in global settings so CWD always equals the notebook's directory:
+
+```
+Settings → search "Jupyter: Notebook File Root" → set to ${fileDirname}
+```
+
+Or add directly to `settings.json`:
+```json
+"jupyter.notebookFileRoot": "${fileDirname}"
+```
+
+With that setting the import cell just needs:
 
 ```python
-import sys
-from pathlib import Path
-
-# Try CWD (workspace — notebook dir is CWD) then CWD/notebooks (Cursor — repo root is CWD)
-_nb = next((str(p) for p in [Path.cwd(), Path.cwd() / "notebooks"] if (p / "zbhelper").is_dir()), None)
-if _nb and _nb not in sys.path:
-    sys.path.insert(0, _nb)
+import sys, os
+if os.getcwd() not in sys.path:
+    sys.path.insert(0, os.getcwd())
 ```
 
 For **pytest** to find the package, add `notebooks/` to `sys.path` once in `conftest.py`:
@@ -176,11 +183,11 @@ if _notebooks not in sys.path:
     sys.path.insert(0, _notebooks)
 ```
 
-| Situation | `"."` resolves to | `import zbhelper` works? |
+| Situation | kernel CWD | `import zbhelper` works? |
 |---|---|---|
-| Workspace notebook | notebook dir = `notebooks/` | ✅ |
-| Local kernel CWD = `notebooks/` | `notebooks/` | ✅ |
-| pytest (via `conftest.py`) | N/A — `conftest.py` adds `notebooks/` | ✅ |
+| Workspace notebook | notebook dir (`notebooks/`) | ✅ always |
+| Cursor / VS Code (with `${fileDirname}`) | notebook dir (`notebooks/`) | ✅ |
+| pytest (via `conftest.py`) | repo root | ✅ |
 
 If a package genuinely belongs in `src/` (shared with non-notebook code), use the walk-up fallback instead:
 
