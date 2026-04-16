@@ -38,7 +38,26 @@ spark = DatabricksSession.builder.serverless().profile("DEFAULT").getOrCreate()
 
 ---
 
-## 2. Pass spark and dbutils as arguments — never create inside modules
+## 2. Always import as module, never import individual names
+
+In notebooks, always import the module and call through it. Never bind individual names with `from … import`.
+
+```python
+# GOOD — zb.func always resolves through the reloaded module
+import zbhelper.ingest_benchmark as zb
+zb.run_benchmark(spark, dbutils)
+
+# BAD — run_benchmark is bound at import time; %autoreload 2 updates zb.run_benchmark
+# but the notebook-level name run_benchmark still points to the old object
+from zbhelper.ingest_benchmark import run_benchmark
+run_benchmark(spark, dbutils)   # stale after edits to the .py file
+```
+
+This pairs with `%autoreload 2`: autoreload replaces attributes on the module object, but it cannot update names that were already copied into the notebook's namespace via `from … import`.
+
+---
+
+## 3. Pass spark and dbutils as arguments — never create inside modules
 
 All functions and `src/` modules receive `spark` (and `dbutils` when needed) as parameters.
 
@@ -64,7 +83,7 @@ def process(table: str):
 
 ---
 
-## 3. Full entrypoint template
+## 4. Full entrypoint template
 
 ```python
 #!/usr/bin/env python3
@@ -89,7 +108,7 @@ main(spark, dbutils)
 
 ---
 
-## 4. Library / `src/` module pattern
+## 5. Library / `src/` module pattern
 
 Type-hint `spark` as `SparkSession` (the Connect-compatible supertype). Never import or call `DatabricksSession` inside a library module.
 
@@ -117,7 +136,7 @@ token = read_secret(dbutils, "my-scope", "my-token")
 
 ---
 
-## 5. Importing helper modules from notebooks
+## 6. Importing helper modules from notebooks
 
 On a Databricks workspace, `"."` (the notebook's own directory) is always on `sys.path`, but `".."` (the parent) is not. This means a helper package imported by notebooks must be **co-located in the same directory** as the notebooks — not under `src/`.
 
@@ -173,7 +192,7 @@ if _src not in sys.path:
 
 ---
 
-## 6. `dbutils` options in `.py` files
+## 7. `dbutils` options in `.py` files
 
 ```python
 # Option A — via DBUtils constructor (pairs naturally with DatabricksSession)
@@ -193,7 +212,7 @@ Option A is preferred when `spark` is already created by the bootstrap guard. Op
 
 ---
 
-## 7. Why this matters
+## 8. Why this matters
 
 | Pattern | Workspace notebook | Local .py (Connect) |
 |---|---|---|
