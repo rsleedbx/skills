@@ -102,11 +102,13 @@ auth_type             = databricks-cli
 
 ### 2. Install `databricks-connect` in your venv
 
+**Do not add `databricks-connect` to `requirements.txt`.** The Databricks VS Code extension installs the correct version automatically to match your cluster/runtime. Pinning it manually causes version mismatches.
+
 `databricks-connect` conflicts with `pyspark` — uninstall PySpark first if present.
 
 ```bash
 pip uninstall pyspark -y
-pip install "databricks-connect==17.3.*"   # match X.Y to your cluster/runtime version
+pip install "databricks-connect==17.3.*"   # only if installing manually; match X.Y to your runtime
 ```
 
 ### 3. Verify
