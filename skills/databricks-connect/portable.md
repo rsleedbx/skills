@@ -152,23 +152,19 @@ src/
   statschema/        # packages used by pytest & scripts stay in src/
 ```
 
-On the **workspace** the notebook's own directory is always on `sys.path`. In **Cursor / VS Code** the kernel CWD defaults to the repo root — fix this once in global settings so CWD always equals the notebook's directory:
+On the **workspace** the notebook's own directory is always on `sys.path`. In **Cursor / VS Code** the kernel CWD is the repo root (workspace folder).
 
-```
-Settings → search "Jupyter: Notebook File Root" → set to ${fileDirname}
-```
+> **Known bug:** `jupyter.notebookFileRoot: "${fileDirname}"` is silently ignored since Jupyter extension 2024.4.0 ([vscode-jupyter#15649](https://github.com/microsoft/vscode-jupyter/issues/15649)). Do not rely on it.
 
-Or add directly to `settings.json`:
-```json
-"jupyter.notebookFileRoot": "${fileDirname}"
-```
-
-With that setting the import cell just needs:
+Use a two-location probe in the notebook instead — checks CWD (workspace) then CWD/notebooks (Cursor):
 
 ```python
-import sys, os
-if os.getcwd() not in sys.path:
-    sys.path.insert(0, os.getcwd())
+import sys
+from pathlib import Path
+
+_nb = next((str(p) for p in [Path.cwd(), Path.cwd() / "notebooks"] if (p / "zbhelper").is_dir()), None)
+if _nb and _nb not in sys.path:
+    sys.path.insert(0, _nb)
 ```
 
 For **pytest** to find the package, add `notebooks/` to `sys.path` once in `conftest.py`:
