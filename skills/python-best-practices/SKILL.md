@@ -38,6 +38,14 @@ VALID = {"ydata", "sdv"}     # duplicate
 - Do not repeat the same logic or the same list of options in multiple places.
 - Extract shared behavior into one function/constant/type; call or reference it.
 - Adding a new option should require editing **one** place (e.g. one enum or one list).
+- **Corollary:** Do not introduce a one-line `def` / function whose only job is to call another single function or wrap one expression **once**—inline at the call site unless the name clarifies a public API or the indirection is reused or tested separately (same idea as “inline a single command” in the shell skill).
+
+## Prerequisites and environment (check once)
+
+- For CLIs, daemons, and `main()`-style entrypoints, **validate prerequisites once** at startup (imports, `shutil.which`, config paths, API reachability where cheap), not inside every branch or request handler.
+- **One global prerequisite / bootstrap** for the process when subcommands share the same stack (e.g. one `ensure_runtime()` that checks all required imports and binaries). Avoid scattering `importlib.util.find_spec` or `shutil.which` in a separate function per subcommand unless a command’s dependencies are genuinely disjoint.
+- **Prefer required dependencies** over optional dual paths: if a library avoids a large `if`/`else` or duplicate logic, declare it in `pyproject.toml` / `requirements.txt` and import it normally instead of optional imports with parallel implementations.
+- When something is truly optional, probe **once** at startup and reuse a flag or strategy object; do not call `which` / `importlib.util.find_spec` repeatedly in hot paths.
 
 ## Prefer Enums for Fixed Sets
 
@@ -85,6 +93,7 @@ python -m venv .venv_test
 
 ## Checklist When Refactoring
 
+- [ ] For scripts and CLIs, are **prerequisites checked once** at entry (one global check when deps overlap, not repeated per branch), and are **required deps** preferred over optional dual code paths?
 - [ ] Is there a single definition of valid options / formats? (enum or one list/dict.)
 - [ ] Is the validation set or “valid values” list derived from that definition, not duplicated?
 - [ ] Are there no redundant aliases (e.g. `FORMAT_X = SOURCE_X`) that could be removed?
