@@ -1,6 +1,6 @@
 ---
 name: docs-writing-style
-description: Writing style rules for technical documentation. Use when writing or editing any markdown docs, FAQ files, implementation notes, how-to guides, or README files. Enforces concise, fact-first style — no editorialising, no repeated facts, cloud-specific content in per-cloud sections, consistent CLI/SDK labelling and ordering.
+description: Writing style rules for technical documentation. Use when writing or editing any markdown docs, FAQ files, implementation notes, how-to guides, or README files. Enforces concise, fact-first style — no editorializing, no repeated facts, cloud-specific content in per-cloud sections, consistent CLI/SDK labeling and ordering.
 ---
 
 # Docs Writing Style
@@ -37,7 +37,7 @@ The second sentence repeats the first with extra words.
 
 ### 3. If you need X, here is how
 
-For how-to content, frame it as a direct action. Do not explain why the user might not know something or apologise for the documentation.
+For how-to content, frame it as a direct action. Do not explain why the user might not know something or apologize for the documentation.
 
 **Bad:**
 > The Databricks docs do not explicitly tell you how to look up the region. This is the most common source of ambiguity.
@@ -56,14 +56,14 @@ This matters especially when the explanation sits between two examples: an imper
 **Bad — imperative implies the reader must do this themselves:**
 > Strip the trailing letter from `default_zone`: `us-west-2a` → `us-west-2`
 
-A reader seeing this before the "Construct the endpoint" step may write their own stripping code, not realising step 3 handles it.
+A reader seeing this before the "Construct the endpoint" step may write their own stripping code, not realizing step 3 handles it.
 
 **Good — descriptive explains what the commands above already did:**
 > `default_zone` is an availability zone (`us-west-2a`); the region is the value without the trailing letter (`us-west-2`). The commands above handle this.
 
 ---
 
-### 4. No editorialising about external systems
+### 4. No editorializing about external systems
 
 Do not describe limitations as "significant", call approaches "workarounds", or note that something is "not officially documented". State what works and how.
 
@@ -223,7 +223,7 @@ python3 -c "from databricks.sdk import WorkspaceClient; print(WorkspaceClient(pr
 ```
 ```
 
-**Bad — inconsistent labelling and order:**
+**Bad — inconsistent labeling and order:**
 
 ```markdown
 ## Get workspace ID
@@ -284,6 +284,35 @@ Every code example marked as runnable must be tested in a terminal before the do
 
 ---
 
+---
+
+### 8. Use US English spelling
+
+All docs use US English. Common British → US substitutions:
+
+| British | US |
+|---|---|
+| serialise / serialises / serialised / serialisation | serialize / serializes / serialized / serialization |
+| optimise / optimised / optimisation | optimize / optimized / optimization |
+| utilise / utilised / utilisation | utilize / utilized / utilization |
+| organise / organised | organize / organized |
+| recognise / recognised | recognize / recognized |
+| normalise / normalised | normalize / normalized |
+| prioritise / prioritised | prioritize / prioritized |
+| capitalise / capitalised | capitalize / capitalized |
+| analyse / analysed / analysing | analyze / analyzed / analyzing |
+| colour / colours / coloured | color / colors / colored |
+| behaviour / behaviours | behavior / behaviors |
+| centre / centres | center / centers |
+| favour / favoured | favor / favored |
+| labelling / labelled | labeling / labeled |
+| modelling | modeling |
+| travelling | traveling |
+| cancelled | canceled |
+| programme / programmes | program / programs |
+
+---
+
 ## Quick checklist before saving a doc edit
 
 - [ ] Does every sentence state a fact or an action?
@@ -301,3 +330,4 @@ Every code example marked as runnable must be tested in a terminal before the do
 - [ ] Are multi-line Python examples wrapped in a `python3 << 'EOF' ... EOF` heredoc so they can be pasted directly into a terminal?
 - [ ] Has every runnable code block been executed in a terminal and produced output matching its `# →` comment?
 - [ ] Does every CLI example use `jq` for JSON field extraction rather than `grep`, `sed`, or inline Python?
+- [ ] Does any word use British spelling (serialise, optimise, colour, behaviour, centre, analyse, etc.)? Replace with US spelling.

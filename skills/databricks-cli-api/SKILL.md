@@ -1,33 +1,53 @@
 ---
 name: databricks-cli-api
-description: Prefer the Databricks CLI `databricks api` subcommands with `--profile` and ~/.databrickscfg for workspace REST calls in scripts and automation. Use when replacing curl + DATABRICKS_HOST + DATABRICKS_TOKEN, adding shell helpers that hit the workspace API, aligning shell tools with Terraform/CLI profile auth, or Unity Catalog external storage / storage credentials / IAM trust by cloud.
+description: Prefer the Databricks CLI `databricks api` subcommands with `--profile` and ~/.databrickscfg for both workspace and account-level REST calls in scripts and automation. Use when replacing curl + DATABRICKS_HOST + DATABRICKS_TOKEN or curl + ACCOUNT_TOKEN, adding shell helpers that hit the workspace or account API, aligning shell tools with Terraform/CLI profile auth, Unity Catalog external storage / storage credentials / IAM trust by cloud, or configuring PNG (Private Network Gateway) destinations with correct private hostnames.
 ---
 
-# Databricks CLI for workspace APIs
+# Databricks CLI for workspace and account APIs
 
 ## Default approach
 
-For **workspace-scoped** HTTP APIs (Unity Catalog, workspace settings, jobs, etc.), use the **Databricks CLI** instead of raw `curl` with `DATABRICKS_HOST` and `DATABRICKS_TOKEN`.
+For **all** Databricks HTTP APIs — workspace-scoped (Unity Catalog, jobs, etc.) **and** account-level (NCC, PNG gateways, workspace list) — use the **Databricks CLI** instead of raw `curl` with manually obtained tokens.
 
 - **Auth**: `host` and `token` (or OAuth where configured) live under a **`[profile]`** in `~/.databrickscfg`.
-- **Profile**: pass **`-p` / `--profile`** on the CLI, or set **`DATABRICKS_PROFILE`** in the environment and have scripts pass `-p "$DATABRICKS_PROFILE"` when non-empty.
-- **Do not** require callers to export `DATABRICKS_HOST` / `DATABRICKS_TOKEN` for flows that the CLI can perform.
+- **Profile**: pass **`-p` / `--profile`** on the CLI, or set **`DATABRICKS_PROFILE`** in the environment.
+- **Do not** require callers to export `DATABRICKS_HOST` / `DATABRICKS_TOKEN`, and do not manually obtain `ACCOUNT_TOKEN` via `databricks auth token | jq .access_token` — the CLI manages auth and token refresh automatically.
 
 ## `databricks api` pattern
 
 ```bash
-# Optional profile (omit -p to use the CLI default profile)
-databricks -p "${DATABRICKS_PROFILE}" api get /api/2.1/unity-catalog/metastore_summary -o json
+# Workspace-scoped API (profile host = workspace URL)
+databricks -p "$WORKSPACE_PROFILE" api get /api/2.1/unity-catalog/metastore_summary
 
-databricks api post /api/2.1/jobs/create --json @payload.json -o json
+databricks -p "$WORKSPACE_PROFILE" api post /api/2.1/jobs/create --json @payload.json
+
+# Account-level API (profile host = accounts.azuredatabricks.net)
+# Path includes /api/2.0/accounts/${ACCOUNT_ID}/... — the CLI prepends the profile host.
+databricks -p "$ACCOUNT_PROFILE" api get \
+  "/api/2.0/accounts/${ACCOUNT_ID}/network-connectivity-configs/${NCC_ID}/private-network-gateways"
+
+databricks -p "$ACCOUNT_PROFILE" api patch \
+  "/api/2.0/accounts/${ACCOUNT_ID}/network-connectivity-configs/${NCC_ID}/private-network-gateways/${PNG_GATEWAY_ID}?update_mask=destinations" \
+  --json "{\"destinations\": ${_MERGED_DESTS}}"
 ```
 
-Subcommands: `get`, `post`, `put`, `patch`, `delete`, `head`. **PATH** is the URL path only (no host); the CLI resolves the workspace host from the profile.
+Subcommands: `get`, `post`, `put`, `patch`, `delete`, `head`. **PATH** is the URL path only (no host); the CLI resolves the host from the profile.
+
+## Convenience alias for repeated account-level calls
+
+When a script makes many account-level calls, define a one-liner alias to avoid repeating `databricks -p "$ACCOUNT_PROFILE" api`:
+
+```bash
+_acct() { databricks -p "$ACCOUNT_PROFILE" api "$@"; }
+
+_acct get  "/api/2.0/accounts/${ACCOUNT_ID}/workspaces"
+_acct post "/api/2.0/accounts/${ACCOUNT_ID}/network-connectivity-configs" --json "$_BODY"
+```
 
 ## When curl is still reasonable
 
-- **Non-workspace** endpoints (rare in this repo), or **headers/body** the CLI cannot express.
 - **CI** that intentionally injects short-lived tokens without a config file (document that exception).
+- Endpoints outside `*.azuredatabricks.net` / `*.databricks.com` (e.g. Azure ARM, AWS APIs).
 
 ## Unity Catalog external tables / locations: who you trust (by cloud)
 
@@ -35,6 +55,47 @@ When wiring **external tables**, **external locations**, and **storage credentia
 
 - **AWS:** The customer IAM role’s **trust policy** must allow **Databricks’ Unity Catalog master IAM role** (fixed **ARNs** published in **Databricks** docs for your **partition**, e.g. commercial vs GovCloud). There is a single documented UC master principal per partition, not “your workspace id.”
 - **Azure / GCP:** You grant **your own** identity access in the storage layer (**Entra ID** service principal or **GCP** service account in ACLs / IAM), then **register that same identity** as the Unity Catalog **storage credential**. There is **no** single Databricks “master account id” to hard-code for those clouds the way there is for AWS UC master role trust.
+
+## PNG (Private Network Gateway) destinations — private hostnames only
+
+PNG's NAT64 mechanism intercepts DNS queries for hostnames in the destination list and encodes the resolved **IPv4** into a `64:ff9b:1::/96` NAT64 address. This only works correctly when the hostname resolves to a **private (RFC 1918) IP**. If a hostname resolves to a public IP, PNG will attempt to route traffic through the private tunnel to a public address, which either silently fails or produces unexpected results.
+
+### Rules
+
+- **Only add hostnames that resolve to private IPs** as PNG destinations:
+  - Azure Flexible Server FQDNs via private endpoints (e.g. `*.mysql.database.azure.com`)
+  - Azure VM internal hostnames (e.g. `*.internal.cloudapp.net`)
+  - Custom private DNS zone names linked to the customer VNet
+- **Never add public FQDNs** as PNG destinations (e.g. `*.eastus2.cloudapp.azure.com`, raw public IPs)
+- For VMs that have **both** a public FQDN (for local CLI access) and an internal hostname (for PNG routing), use the **internal hostname** as the PNG destination
+
+### SQL_DNS naming convention for PNG discovery scripts
+
+When a session sources multiple DB setup scripts, each must export its own named variable for the PNG-routable hostname. Using a shared `SQL_DNS` risks the wrong value (e.g. a VM's public FQDN) being picked up by the PNG discovery loop.
+
+```bash
+# ✗ Bad — SQL_DNS may be the public FQDN from a VM setup script
+for _extra in ${SQL_DNS:-} ${SQL_DNS_MYSQL:-} ...; do _add_dns "$_extra"; done
+
+# ✓ Good — only the named variables, each explicitly set to the private hostname
+export SQL_DNS_MYSQL="$VM_INTERNAL_DNS"   # *.internal.cloudapp.net
+export SQL_DNS_PG="$VM_INTERNAL_DNS"
+export SQL_DNS_SQL="$VM_INTERNAL_DNS"
+for _extra in ${SQL_DNS_MYSQL:-} ${SQL_DNS_PG:-} ${SQL_DNS_SQL:-}; do
+  _add_dns "$_extra"
+done
+```
+
+### Verifying PNG is intercepting correctly
+
+From a Databricks serverless notebook:
+```bash
+# Should return a 64:ff9b:1:0:.../3306 NAT64 address and "Connected"
+curl -v --connect-timeout 5 telnet://<internal-hostname>:3306
+# "Failure writing output to destination" = binary MySQL handshake = success
+```
+
+If `nslookup` returns the plain A record (not NAT64), the hostname is not in the PNG destination list or PNG has not yet reached ESTABLISHED state.
 
 ## Repo examples
 

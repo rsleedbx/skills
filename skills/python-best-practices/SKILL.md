@@ -59,6 +59,76 @@ VALID = {"ydata", "sdv"}     # duplicate
 - Prefer one clear way to do things: one type (e.g. `SchemaSource`), one name per concept, one canonical representation.
 - If refactoring, update call sites and tests to the new API instead of keeping old names “for compatibility.”
 
+## Never swallow exceptions silently
+
+Bare `except: pass` or `except Exception: pass` turns every error into silent wrong behavior — the function returns `None`, an empty list, or stale data, and nothing in the logs explains why. This is the Python equivalent of `2>/dev/null` on a data-fetching shell command.
+
+### Anti-patterns
+
+```python
+# BAD — any error (network, auth, wrong field name, JSON decode) → None returned silently
+try:
+    resp = requests.get(url)
+    return resp.json()["value"]
+except:
+    pass
+
+# BAD — bare Exception catch with no log
+try:
+    result = some_api_call()
+except Exception:
+    result = {}   # caller sees empty dict, has no idea why
+```
+
+### Rules
+
+| Situation | Pattern |
+|-----------|---------|
+| **Expected, recoverable error** | Catch the specific exception type; log it; return a sensible default with a comment explaining why |
+| **Unexpected error** | Let it propagate (`raise`) — do not catch at all, or catch only to add context and re-raise |
+| **Optional operation** (failure is acceptable) | Catch specific exception; log at `WARNING` level; document the fallback behavior |
+| **Cleanup in finally** | Use `finally`; do not suppress the original exception |
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+# GOOD — specific exception, logged, documented fallback
+def get_host_fqdn(secret: dict) -> str | None:
+    try:
+        return secret["host_fqdn"]
+    except KeyError:
+        logger.warning("secret missing 'host_fqdn' field — skipping: %s", secret.get("key"))
+        return None
+
+# GOOD — let unexpected errors propagate; caller decides how to handle
+def fetch_gateway(client, gateway_id: str) -> dict:
+    resp = client.get(f"/gateways/{gateway_id}")
+    resp.raise_for_status()   # HTTPError propagates to caller
+    return resp.json()
+
+# GOOD — add context, re-raise so the stack trace is not lost
+def load_config(path: str) -> dict:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in config file '{path}'") from exc
+```
+
+### When a broad catch is unavoidable
+
+If you must catch a broad exception (e.g. in a top-level loop that must continue), **always log the exception with traceback**:
+
+```python
+for item in items:
+    try:
+        process(item)
+    except Exception:
+        logger.exception("failed to process item %r — skipping", item)
+        # ^ logger.exception() includes the full traceback automatically
+```
+
 ## Normalize Early, Use Strong Types
 
 - Convert string input (e.g. from YAML or CLI) to the canonical type (e.g. `SchemaSource`) at the boundary.
@@ -90,6 +160,28 @@ python -m venv .venv_test
 - **Fix skipped tests before considering the change done.** A skip means a dependency is missing from `.venv_test` or a fixture is absent — add it.
 - **Do not use the system `python` or a venv that lacks `pyspark`** — tests that build Spark DataFrames will skip silently.
 - To run against a real Databricks workspace use `.venv_3_11` (has `databricks-connect`). Both venvs should produce 0 skips.
+
+## Python packages and VS Code / Cursor extensions
+
+Some Python packages install Jupyter Lab extensions inside `.venv` that contain `package.json` files. VS Code/Cursor extensions that scan for npm packages (e.g. Red Hat Dependency Analytics) will find these and emit warnings like:
+
+```
+component analysis error: package.json requires a lock file.
+```
+
+The file is a read-only artifact installed by pip — it is not your project code and cannot be changed. The warning does not indicate a vulnerability was found; it means the extension skipped the analysis.
+
+**Known packages that cause this:** `ipywidgets` (installs `@jupyter-widgets/jupyterlab-manager/package.json`).
+
+**Fix:** Add `.venv` to the extension's exclude list in the workspace `.vscode/settings.json`:
+
+```json
+"redhat.dependency-analytics.excludedFolders": [".venv"]
+```
+
+Other repos whose `.venv` does not contain any `package.json` files (e.g. repos that don't install `ipywidgets`) will not trigger this warning — which is why only specific workspaces see it.
+
+---
 
 ## Checklist When Refactoring
 
