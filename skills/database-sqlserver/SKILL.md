@@ -48,7 +48,88 @@ ALTER ROLE db_ddladmin ADD MEMBER [lfc_user];
 | `db_owner` | Change Tracking, CDC, DML on all tables |
 | `db_ddladmin` | Schema evolution DDL (ALTER TABLE, CREATE INDEX) |
 
-## Create as DBA, do everything else as LFC user
+## LakeFlow Connect DDL script URL
+
+The schema evolution DDL script is versioned and hosted by Databricks:
+
+```
+https://docs.databricks.com/aws/en/assets/files/ddl_support_objects-06ebad393ea6bc7d853d5504dc6542de.sql
+```
+
+Download and inject with `sed` to replace placeholders before running via sqlcmd:
+
+```bash
+LAKEFLOW_DDL_SCRIPT_URL="https://docs.databricks.com/aws/en/assets/files/ddl_support_objects-06ebad393ea6bc7d853d5504dc6542de.sql"
+curl -fsSL "$LAKEFLOW_DDL_SCRIPT_URL" \
+  | sed "s/@replicationUser/${LFC_USER}/g; s/@mode/CT/g" \
+  | sqlcmd -S "$HOST,$PORT" -d "$CATALOG" -U sa -P "$SA_PASS" -C
+```
+
+## CDC requires `autocommit=True` — cannot run in a transaction
+
+`ALTER DATABASE SET CHANGE_TRACKING`, `EXEC sys.sp_cdc_enable_db`, and `EXEC sys.sp_cdc_enable_table` **cannot run inside a transaction**. If called via a database connection with autocommit=False (the default for most DB drivers), the commands fail silently or with:
+
+```
+The database principal owns a schema in the database, and cannot be dropped.
+```
+
+Always use `autocommit=True` for these operations:
+
+```python
+# Python pymssql / pyodbc — must set autocommit
+conn.autocommit = True
+cursor.execute("EXEC sys.sp_cdc_enable_db")
+conn.autocommit = False  # restore
+```
+
+```bash
+# sqlcmd — no explicit autocommit needed (runs each batch in its own implicit transaction)
+sqlcmd -S "$HOST,$PORT" -d "$CATALOG" -U sa -P "$SA_PASS" -C -Q "EXEC sys.sp_cdc_enable_db"
+```
+
+## `sp_cdc_enable_table` — use `@supports_net_changes = 0`
+
+```sql
+EXEC sys.sp_cdc_enable_table
+  @source_schema     = N'dbo',
+  @source_name       = N'dtix',
+  @role_name         = NULL,
+  @supports_net_changes = 0;   -- 0 = don't create net changes function (simpler, compatible with all editions)
+```
+
+`@supports_net_changes = 1` creates an extra function that requires Enterprise/Developer editions. Set `0` for maximum compatibility.
+
+Wrap with guard to only run when `cdc` schema exists:
+```sql
+IF EXISTS (SELECT * FROM sys.schemas WHERE name = 'cdc')
+BEGIN
+  IF NOT EXISTS (
+    SELECT * FROM cdc.change_tables
+    WHERE source_object_id = OBJECT_ID(N'dbo.dtix')
+  )
+    EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'dtix',
+      @role_name = NULL, @supports_net_changes = 0;
+END
+```
+
+## CDC availability: Express/Web editions — CT is sufficient fallback
+
+SQL Server Express and Web editions do not support CDC. After attempting to enable CDC, **verify via `sys.databases` rather than trusting the stored proc's exit code**:
+
+```sql
+SELECT is_cdc_enabled FROM sys.databases WHERE name = DB_NAME();
+-- Returns 1 if CDC is actually enabled, 0 if not
+```
+
+If `is_cdc_enabled = 0` after running `sp_cdc_enable_db`, CDC is unavailable on this edition. This is not an error — Change Tracking covers tables with primary keys. Return success with a note:
+
+```
+CDC not available on this SQL Server edition (Express/Web).
+Change Tracking enabled — sufficient for tables with primary keys (intpk).
+CDC required only for non-PK tables (dtix) on supported editions.
+```
+
+
 
 After LFC user creation and login verification, switch to the LFC user for all subsequent operations:
 
@@ -89,38 +170,123 @@ EOF
 
 CT is lightweight row-level change tracking. Does not require sysadmin.
 
-```sql
--- Database-level CT
-ALTER DATABASE [<catalog>]
-  SET CHANGE_TRACKING = ON
-  (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON);
+**Database-level CT** — requires dynamic SQL because `ALTER DATABASE` doesn't accept a variable for the DB name:
 
--- Table-level CT
-ALTER TABLE [dbo].[intpk]
+```sql
+-- Idempotent: only enable if not already enabled
+IF EXISTS (SELECT * FROM sys.change_tracking_databases WHERE database_id=DB_ID())
+    SELECT 'CT already enabled'
+ELSE
+  BEGIN
+    SELECT 'CT enabled on database';
+    EXEC ('ALTER DATABASE <catalog> SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON)');
+  END
+go
+```
+
+Verify:
+```sql
+SELECT * FROM sys.change_tracking_databases WHERE database_id = DB_ID();
+-- Non-empty output = CT enabled
+```
+
+**Table-level CT** — always include `TRACK_COLUMNS_UPDATED = ON`:
+
+```sql
+ALTER TABLE [<schema>].[intpk]
   ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
 ```
 
-Check:
+> `TRACK_COLUMNS_UPDATED = ON` — required for LFC to identify which columns changed. Always include this flag.
+
+Verify CT on tables:
 ```sql
-SELECT * FROM sys.change_tracking_databases WHERE database_id = DB_ID();
-SELECT * FROM sys.change_tracking_tables WHERE object_id = OBJECT_ID('dbo.intpk');
+SELECT DB_NAME()                 AS TABLE_CAT,
+       SCHEMA_NAME(t.schema_id)  AS TABLE_SCHEM,
+       t.name                    AS TABLE_NAME
+FROM sys.change_tracking_tables ctt
+LEFT JOIN sys.tables t ON ctt.object_id = t.object_id
+WHERE t.schema_id = SCHEMA_ID('<schema>')
+-- Non-empty = tables are CT-enabled
 ```
 
 ## CDC (Change Data Capture)
 
 CDC captures before/after row images. Requires `sysadmin` at database-level.
 
-### Database-level CDC — platform variants
+### Database-level CDC — portable multi-platform ladder
+
+Run all three procedures in one script guarded by `is_cdc_enabled` checks. Each tries only if the previous didn't succeed — making the script work across all platforms without conditionals:
 
 ```sql
--- Azure SQL / on-premise SQL Server
-EXEC sys.sp_cdc_enable_db;
+SET NOCOUNT ON
+go
+-- Check/report current state
+IF EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+    SELECT 'CDC already enabled'
+ELSE
+    SELECT 'CDC enabled on database'
+go
+-- Azure SQL / on-premise SQL Server (vm and azure sql)
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC sys.sp_cdc_enable_db
+go
+-- GCP Cloud SQL SQL Server
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>'
+go
+-- AWS RDS SQL Server
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC msdb.dbo.rds_cdc_enable_db '<catalog>'
+go
+```
 
--- AWS RDS
-EXEC msdb.dbo.rds_cdc_enable_db '<catalog>';
+> **`SET NOCOUNT ON` before CDC stored procs** — required to fix "Invalid cursor state, SQL state 24000 in SQLExecDirect" that occurs when row-count messages interfere with cursor state.
 
+Verify after enable:
+```sql
+SELECT name, is_cdc_enabled FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1
+-- Non-empty output = success
+```
+
+### CDC disable — portable multi-platform ladder
+
+```sql
+-- First disable table-level CDC
+EXEC sys.sp_cdc_disable_table
+  @source_schema = N'<schema>', @source_name = N'<table>', @capture_instance = N'all'
+go
+-- Then disable database-level
+-- Azure SQL / on-premise
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=0)
+  EXEC sys.sp_cdc_disable_db
+go
 -- GCP Cloud SQL
-EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>';
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=0)
+  EXEC msdb.dbo.gcloudsql_cdc_disable_db '<catalog>'
+go
+-- AWS RDS
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=0)
+  EXEC msdb.dbo.rds_cdc_disable_db '<catalog>'
+go
+```
+
+### CDC availability — auto-fallback to CT
+
+If CDC cannot be enabled (Express/Web edition, or insufficient permissions), the lakeflow_connect reference implementation **auto-falls back to CT mode**:
+
+```bash
+# After running set_cdc_on_catalog:
+if [[ ! -s /tmp/sqlcmd_stdout.$$ ]]; then
+    echo "ERROR: CDC COULD NOT BE ENABLED. CHANGING TO CT ONLY MODE"
+    CDC_CT_MODE=CT
+fi
+```
+
+Verify CDC availability before deciding mode:
+```sql
+SELECT name, is_cdc_enabled FROM sys.databases WHERE name = DB_NAME() AND is_cdc_enabled = 1
+-- Empty result = CDC not available on this edition/permissions
 ```
 
 ### Table-level CDC
@@ -155,14 +321,40 @@ Set `CDC_CT_MODE=CT|CDC|BOTH|NONE` in LFC setup scripts to control what is enabl
 
 ## Schema evolution DDL objects
 
-LFC uses `ddl_support_objects.sql` to capture DDL changes (ALTER TABLE). Inject via `sed` before running with `sqlcmd`:
+LFC uses `ddl_support_objects.sql` (for CDC+BOTH modes) or `ddl_support_objects_ct_only.sql` (for CT-only mode). Choose the right file based on `CDC_CT_MODE`:
 
 ```bash
-sed "s/@replicationUser/${LFC_USER}/g; s/@mode/CT/g" ddl_support_objects.sql \
+ddl_script_url="https://docs.databricks.com/aws/en/assets/files/ddl_support_objects-06ebad393ea6bc7d853d5504dc6542de.sql"
+
+case "${CDC_CT_MODE}" in
+  "BOTH"|"CDC") ddl_script=./ddl_support_objects.sql ;;
+  "CT")         ddl_script=./ddl_support_objects_ct_only.sql ;;
+  *)            echo "CDC_CT_MODE must be BOTH, CDC, or CT for schema evolution"; return 1 ;;
+esac
+
+# Use local file if present, else download
+if [[ -f "$ddl_script" ]]; then
+    cat "$ddl_script"
+else
+    wget -qO- "$ddl_script_url"
+fi | sed -e "s/SET \@replicationUser = '';/SET \@replicationUser = '${LFC_USER}';/" \
+        -e "s/\@mode = '.*';/\@mode = '$CDC_CT_MODE';/" \
   | sqlcmd -S "$HOST,$PORT" -d "$CATALOG" -U sa -P "$SA_PASS" -C
 ```
 
-`utility_script.sql` installs companion stored procedures for table discovery and CT/CDC status.
+## Utility script
+
+A companion script for table discovery and CT/CDC status:
+
+```bash
+utility_script_url="https://docs.databricks.com/aws/en/assets/files/utility_script-a4544ba646de3f6f3fd03eb3dcba563e.sql"
+
+if [[ -f "$utility_script_path" ]]; then
+    cat "$utility_script_path"
+else
+    wget -qO- "$utility_script_url"
+fi | sqlcmd -S "$HOST,$PORT" -d "$CATALOG" -U sa -P "$SA_PASS" -C
+```
 
 ## Identifier quoting: brackets for hyphens
 

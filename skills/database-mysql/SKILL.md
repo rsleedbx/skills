@@ -36,15 +36,83 @@ The `debian.cnf` account is managed by the OS package manager (not by users) and
 
 ```sql
 -- Schema-level: DML + DDL for LFC to create tables and run queries
-GRANT ALTER, CREATE, DROP, SELECT, INSERT, DELETE, UPDATE
-  ON `<schema>`.* TO '<lfc_user>'@'%';
+-- NOTE: lakeflow_connect reference implementation uses global *.* not schema.*
+GRANT ALTER, CREATE, DROP, SELECT, INSERT, DELETE, UPDATE ON *.* TO '<lfc_user>'@'%';
 
 -- Server-level: binlog replication
 GRANT REPLICATION CLIENT ON *.* TO '<lfc_user>'@'%';
 GRANT REPLICATION SLAVE  ON *.* TO '<lfc_user>'@'%';
 ```
 
-Always create the user as `@'%'` (any host), not `@'localhost'` — LFC connects via TCP from Databricks serverless, not from the local socket.
+> **`*.*` vs `schema.*`**: The lakeflow_connect reference scripts grant on `*.*` globally (not per-schema). This is simpler for demo setups but broader than the principle of least privilege. For production, scope to the specific schema.
+
+## Test tables: intpk and dtix (MySQL canonical DDL)
+
+From the lakeflow_connect reference implementation (`mysql/02_mysql_configure.sh`):
+
+```sql
+CREATE TABLE IF NOT EXISTS <schema>.intpk (
+  pk  SERIAL PRIMARY KEY,
+  dt  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  ops VARCHAR(255) DEFAULT 'insert'
+);
+
+CREATE TABLE IF NOT EXISTS <schema>.dtix (
+  pk  BIGINT,
+  dt  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  ops VARCHAR(255) DEFAULT 'insert'
+);
+```
+
+Key differences from other engines:
+- `SERIAL` = `BIGINT UNSIGNED NOT NULL AUTO_INCREMENT` (MySQL-specific)
+- `ON UPDATE CURRENT_TIMESTAMP` — updates `dt` automatically on any row change
+- `dtix` has a `pk BIGINT` column (non-primary-key — manually managed identifier for DML loops)
+
+## endless_dml_loop stored procedure (full)
+
+```sql
+DELIMITER $$
+
+CREATE PROCEDURE endless_dml_loop(
+    IN dml_interval_sec INT,
+    IN max_iterations   INT
+)
+BEGIN
+    DECLARE counter        INT DEFAULT 0;
+    DECLARE sleep_interval INT DEFAULT COALESCE(dml_interval_sec, 60);
+    DECLARE stop_after     INT DEFAULT COALESCE(max_iterations, 30);
+
+    WHILE counter < stop_after DO
+        INSERT INTO intpk (dt) VALUES (CURRENT_TIMESTAMP()), (CURRENT_TIMESTAMP()), (CURRENT_TIMESTAMP());
+        COMMIT;
+        DELETE FROM intpk WHERE pk = (SELECT min_pk FROM (SELECT MIN(pk) AS min_pk FROM intpk) AS temp);
+        COMMIT;
+        UPDATE intpk SET dt = CURRENT_TIMESTAMP()
+          WHERE pk = (SELECT min_pk FROM (SELECT MIN(pk) AS min_pk FROM intpk) AS temp);
+        COMMIT;
+
+        INSERT INTO dtix (pk, dt) VALUES (1, CURRENT_TIMESTAMP()), (2, CURRENT_TIMESTAMP()), (3, CURRENT_TIMESTAMP());
+        COMMIT;
+
+        SELECT CONCAT('Counter ', counter, ' of ', stop_after,
+                      ' (sleeping ', sleep_interval, 's)') AS notice;
+        SET counter = counter + 1;
+        DO SLEEP(sleep_interval);
+    END WHILE;
+
+    SELECT CONCAT('Completed ', counter, ' iterations') AS final_notice;
+END $$
+```
+
+Setup and grant:
+```sql
+DROP PROCEDURE IF EXISTS endless_dml_loop;  -- DBA drops first so it can always be reset
+-- (CREATE PROCEDURE as above)
+GRANT EXECUTE ON PROCEDURE endless_dml_loop TO '<lfc_user>';
+```
+
+Invoke: `CALL <schema>.endless_dml_loop(NULL, NULL);` (defaults: 60s interval, 30 iterations)
 
 ## Required server parameters for LFC (binlog CDC)
 

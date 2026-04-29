@@ -36,10 +36,13 @@ Both tables are created in the `lfc_test_db` (or caller-specified `DB_SCHEMA`) s
 The LFC user needs these grants for binlog CDC:
 
 ```sql
-GRANT ALTER, CREATE, DROP, SELECT, INSERT, DELETE, UPDATE ON `<schema>`.* TO '<lfc_user>'@'%';
+-- lakeflow_connect reference uses global *.* (not schema-specific) for simplicity
+GRANT ALTER, CREATE, DROP, SELECT, INSERT, DELETE, UPDATE ON *.* TO '<lfc_user>'@'%';
 GRANT REPLICATION CLIENT ON *.* TO '<lfc_user>'@'%';
 GRANT REPLICATION SLAVE  ON *.* TO '<lfc_user>'@'%';
 ```
+
+> For production, scope DDL grants to a specific schema (`<schema>.*`) rather than `*.*`.
 
 Required server parameters:
 | Parameter | Value |
@@ -111,37 +114,49 @@ Uncleared slots hold WAL and grow the disk indefinitely. Always drop slots when 
 
 ## SQL Server — CT and CDC setup
 
-**Database-level:**
+**Database-level CT** — requires dynamic SQL for the database name:
 ```sql
--- Change Tracking (CT)
-ALTER DATABASE [<catalog>] SET CHANGE_TRACKING = ON
-  (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON);
-
--- CDC (Azure SQL)
-EXEC sys.sp_cdc_enable_db;
-
--- CDC (AWS RDS)
-EXEC msdb.dbo.rds_cdc_enable_db '<catalog>';
-
--- CDC (GCP Cloud SQL)
-EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>';
+IF EXISTS (SELECT * FROM sys.change_tracking_databases WHERE database_id=DB_ID())
+    SELECT 'CT already enabled'
+ELSE
+  BEGIN
+    EXEC ('ALTER DATABASE <catalog> SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON)');
+  END
 ```
 
-**Table-level:**
+**Database-level CDC** — portable multi-platform ladder (run all three; only the one matching the platform succeeds):
 ```sql
--- CT on intpk
-ALTER TABLE [<schema>].[intpk] ENABLE CHANGE_TRACKING;
+SET NOCOUNT ON  -- required; prevents "Invalid cursor state" errors
+go
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC sys.sp_cdc_enable_db                         -- Azure SQL / on-premise
+go
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>' -- GCP Cloud SQL
+go
+IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
+  EXEC msdb.dbo.rds_cdc_enable_db '<catalog>'       -- AWS RDS
+go
+```
 
--- CDC on dtix (Azure SQL / on-premise)
+**Table-level CT** — always include `TRACK_COLUMNS_UPDATED = ON`:
+```sql
+ALTER TABLE [<schema>].[intpk] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+```
+
+**Table-level CDC:**
+```sql
 EXEC sys.sp_cdc_enable_table
-  @source_schema = '<schema>', @source_name = 'dtix',
-  @role_name = NULL, @capture_instance = NULL;
-
--- CDC on dtix (AWS RDS)
-EXEC msdb.dbo.rds_cdc_enable_table '<schema>', 'dtix';
+  @source_schema = N'<schema>', @source_name = N'dtix',
+  @role_name = NULL, @supports_net_changes = 0;
 ```
 
-**Schema evolution objects:** Inject `ddl_support_objects.sql` via `sed` to replace `@replicationUser` and `@mode` placeholders before executing with `sqlcmd`.
+**Schema evolution objects:**
+- Use `ddl_support_objects.sql` for `CDC_CT_MODE=BOTH|CDC`
+- Use `ddl_support_objects_ct_only.sql` for `CDC_CT_MODE=CT`
+- Inject `@replicationUser` and `@mode` via `sed` before running with `sqlcmd`.
+
+**Auto-fallback:** If CDC cannot be enabled (Express/Web edition), fall back to `CDC_CT_MODE=CT`.
 
 ## SQL Server — LFC user grants
 

@@ -174,15 +174,24 @@ az postgres flexible-server parameter set \
 echo "wal_level = logical" >> /etc/postgresql/16/main/postgresql.conf
 systemctl restart postgresql
 
-# AWS RDS — via parameter group
+# AWS RDS — via parameter group (full set required for LFC)
 aws rds modify-db-parameter-group \
   --db-parameter-group-name "$PARAM_GROUP" \
-  --parameters "ParameterName=rds.logical_replication,ParameterValue=1,ApplyMethod=pending-reboot"
+  --parameters "[
+    {\"ParameterName\":\"rds.logical_replication\",\"ParameterValue\":\"1\",\"ApplyMethod\":\"pending-reboot\"},
+    {\"ParameterName\":\"rds.force_ssl\",\"ParameterValue\":\"0\",\"ApplyMethod\":\"pending-reboot\"},
+    {\"ParameterName\":\"max_replication_slots\",\"ParameterValue\":\"10\",\"ApplyMethod\":\"pending-reboot\"},
+    {\"ParameterName\":\"max_wal_senders\",\"ParameterValue\":\"15\",\"ApplyMethod\":\"pending-reboot\"},
+    {\"ParameterName\":\"max_worker_processes\",\"ParameterValue\":\"10\",\"ApplyMethod\":\"pending-reboot\"},
+    {\"ParameterName\":\"max_slot_wal_keep_size\",\"ParameterValue\":\"10240\",\"ApplyMethod\":\"pending-reboot\"}
+  ]"
 
 # GCP Cloud SQL
 gcloud sql instances patch "$INSTANCE" \
   --database-flags cloudsql.logical_decoding=on
 ```
+
+> **AWS RDS parameter values:** `max_wal_senders=15` (not 10), `max_slot_wal_keep_size=10240` (10 GiB cap to prevent unbounded WAL growth). Apply all six params together and reboot once.
 
 ## Replica identity: what goes into CDC events
 
@@ -228,6 +237,68 @@ Always drop slots when destroying or recreating a gateway pipeline.
 | PostgreSQL on-premise / Azure Flexible Server | `ALTER ROLE lfc_user WITH REPLICATION;` |
 | AWS RDS | `GRANT rds_replication TO lfc_user;` (the REPLICATION attribute is not available to non-superusers) |
 | GCP Cloud SQL | `ALTER ROLE lfc_user WITH REPLICATION;` (available to `cloudsqlsuperuser`) |
+
+> **Run both grants together** — the lakeflow_connect reference implementation runs `ALTER ROLE ... WITH REPLICATION` AND `GRANT rds_replication` in the same block. On non-RDS platforms, the `GRANT rds_replication` fails silently (role doesn't exist). On RDS, `ALTER ROLE WITH REPLICATION` fails silently (not permitted). Running both makes the script portable across platforms without conditionals.
+
+```sql
+ALTER ROLE <lfc_user> WITH REPLICATION;   -- succeeds on Azure / on-premise / GCP
+GRANT rds_replication TO <lfc_user>;      -- succeeds on AWS RDS (fails silently elsewhere)
+```
+
+## Test tables: intpk and dtix (PostgreSQL canonical DDL)
+
+From the lakeflow_connect reference implementation (`postgres/02_postgres_configure.sh`):
+
+```sql
+CREATE TABLE IF NOT EXISTS <schema>.intpk (
+  pk SERIAL PRIMARY KEY,
+  dt TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS <schema>.dtix (
+  dt TIMESTAMP
+);
+```
+
+Key PostgreSQL specifics:
+- `SERIAL` = auto-increment integer PK (PostgreSQL-specific)
+- `dtix` has **no `pk` column** and **no `ops` column** — just `dt TIMESTAMP`
+- No `DEFAULT CURRENT_TIMESTAMP` — `dt` must be supplied in INSERT
+- These are intentionally minimal for CDC testing
+
+## Replica identity: per-table based on CDC_CT_MODE
+
+Set via `pg_class.relreplident`. The lakeflow_connect reference uses `CDC_CT_MODE` to decide:
+
+| CDC_CT_MODE | dtix | intpk |
+|-------------|------|-------|
+| `BOTH` or `CDC` | `FULL` (`f`) | `DEFAULT` (`d`) |
+| `BOTH` or `CT` | — | `DEFAULT` (`d`) |
+| `NONE` | `NOTHING` (`n`) | `NOTHING` (`n`) |
+
+```bash
+# Check current replica identity for both tables
+psql -c "
+  SELECT nspname, relname, relreplident
+  FROM pg_class AS c
+  JOIN pg_namespace AS ns ON c.relnamespace = ns.oid
+  WHERE nspname = '$DB_SCHEMA' AND relname IN ('dtix', 'intpk')
+"
+# relreplident values: d=DEFAULT, f=FULL, n=NOTHING, i=INDEX
+# Grep patterns used in lakeflow_connect reference:
+#   "${DB_SCHEMA},dtix,f"   → FULL (expected when CDC_CT_MODE=BOTH|CDC)
+#   "${DB_SCHEMA},dtix,n"   → NOTHING (expected when CDC_CT_MODE=NONE)
+#   "${DB_SCHEMA},intpk,d"  → DEFAULT (expected when CDC_CT_MODE=BOTH|CT)
+#   "${DB_SCHEMA},intpk,n"  → NOTHING (expected when CDC_CT_MODE=NONE)
+```
+
+Set replica identity:
+```sql
+ALTER TABLE <schema>.dtix  REPLICA IDENTITY FULL;     -- for CDC_CT_MODE=BOTH|CDC
+ALTER TABLE <schema>.dtix  REPLICA IDENTITY NOTHING;  -- for CDC_CT_MODE=NONE
+ALTER TABLE <schema>.intpk REPLICA IDENTITY DEFAULT;  -- for CDC_CT_MODE=BOTH|CT
+ALTER TABLE <schema>.intpk REPLICA IDENTITY NOTHING;  -- for CDC_CT_MODE=NONE
+```
 
 ## Identifier quoting: double quotes for hyphens
 
