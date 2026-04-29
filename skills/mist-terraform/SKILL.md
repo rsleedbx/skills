@@ -231,6 +231,8 @@ Each cloud uses a different variable name for the allowed IP list in `terraform.
 | Azure | `allowed_cidrs` | `azurerm_firewall_policy_rule_collection` or NSG |
 | GCP | `authorized_networks` | `google_sql_database_instance.settings.ip_configuration.authorized_networks` |
 
+> For full IP discovery patterns (split tunneling, serverless egress, per-cloud firewall commands), see the `firewall-ip-discovery` skill.
+
 `terraform_common.sh` auto-injects the caller's current IP into the appropriate variable:
 
 ```bash

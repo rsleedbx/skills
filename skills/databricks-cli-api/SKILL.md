@@ -56,35 +56,23 @@ When wiring **external tables**, **external locations**, and **storage credentia
 - **AWS:** The customer IAM role’s **trust policy** must allow **Databricks’ Unity Catalog master IAM role** (fixed **ARNs** published in **Databricks** docs for your **partition**, e.g. commercial vs GovCloud). There is a single documented UC master principal per partition, not “your workspace id.”
 - **Azure / GCP:** You grant **your own** identity access in the storage layer (**Entra ID** service principal or **GCP** service account in ACLs / IAM), then **register that same identity** as the Unity Catalog **storage credential**. There is **no** single Databricks “master account id” to hard-code for those clouds the way there is for AWS UC master role trust.
 
-## PNG (Private Network Gateway) destinations — private hostnames only
+## PNG (Private Network Gateway) destinations
 
-PNG's NAT64 mechanism intercepts DNS queries for hostnames in the destination list and encodes the resolved **IPv4** into a `64:ff9b:1::/96` NAT64 address. This only works correctly when the hostname resolves to a **private (RFC 1918) IP**. If a hostname resolves to a public IP, PNG will attempt to route traffic through the private tunnel to a public address, which either silently fails or produces unexpected results.
+PNG's NAT64 mechanism intercepts DNS queries for hostnames in the destination list. This only works correctly when the hostname resolves to a **private (RFC 1918) IP**.
 
 ### Rules
 
-- **Only add hostnames that resolve to private IPs** as PNG destinations:
-  - Azure Flexible Server FQDNs via private endpoints (e.g. `*.mysql.database.azure.com`)
-  - Azure VM internal hostnames (e.g. `*.internal.cloudapp.net`)
-  - Custom private DNS zone names linked to the customer VNet
-- **Never add public FQDNs** as PNG destinations (e.g. `*.eastus2.cloudapp.azure.com`, raw public IPs)
-- For VMs that have **both** a public FQDN (for local CLI access) and an internal hostname (for PNG routing), use the **internal hostname** as the PNG destination
+- **Only add hostnames that resolve to private IPs** as PNG destinations (Azure Flexible Server FQDNs via private endpoints, VM internal hostnames, custom private DNS zones)
+- **Never add public FQDNs** or raw public IPs as PNG destinations
+- For VMs with both a public FQDN and an internal hostname, use the **internal hostname** as the PNG destination
+
+See `databricks-private-network-gateway` skill for the full PNG API, destination management, and verification patterns.
 
 ### SQL_DNS naming convention for PNG discovery scripts
 
-When a session sources multiple DB setup scripts, each must export its own named variable for the PNG-routable hostname. Using a shared `SQL_DNS` risks the wrong value (e.g. a VM's public FQDN) being picked up by the PNG discovery loop.
+Using a shared `SQL_DNS` risks the wrong value (e.g. a VM's public FQDN) being picked up by the PNG discovery loop. Export named per-engine vars (`SQL_DNS_MYSQL`, `SQL_DNS_PG`, `SQL_DNS_SQL`) pointing to the private/internal hostname only.
 
-```bash
-# ✗ Bad — SQL_DNS may be the public FQDN from a VM setup script
-for _extra in ${SQL_DNS:-} ${SQL_DNS_MYSQL:-} ...; do _add_dns "$_extra"; done
-
-# ✓ Good — only the named variables, each explicitly set to the private hostname
-export SQL_DNS_MYSQL="$VM_INTERNAL_DNS"   # *.internal.cloudapp.net
-export SQL_DNS_PG="$VM_INTERNAL_DNS"
-export SQL_DNS_SQL="$VM_INTERNAL_DNS"
-for _extra in ${SQL_DNS_MYSQL:-} ${SQL_DNS_PG:-} ${SQL_DNS_SQL:-}; do
-  _add_dns "$_extra"
-done
-```
+See `databricks-private-network-gateway` skill for the full naming convention and bash example.
 
 ### Verifying PNG is intercepting correctly
 

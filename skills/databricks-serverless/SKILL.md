@@ -40,7 +40,7 @@ done
 
 When PNG routes a connection, DNS64 wraps the private endpoint IPv4 inside a NAT64 address (`64:ff9b:1::/96` prefix). `nslookup` works normally.
 
-**Decoding NAT64 → IPv4:** last 32 bits of the address hold the IPv4.
+**Decoding NAT64 → IPv4:** last 32 bits of the address hold the IPv4:
 
 ```
 64:ff9b:1:0:ac1f:e0c3: 0a0a : 0304
@@ -48,31 +48,13 @@ When PNG routes a connection, DNS64 wraps the private endpoint IPv4 inside a NAT
                         0x0a.0x0a.0x03.0x04  →  10.10.3.4
 ```
 
-```python
-import ipaddress
-
-def decode_nat64(addr: str) -> str | None:
-    NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b:1::/96")
-    try:
-        v6 = ipaddress.IPv6Address(addr)
-    except ValueError:
-        return None
-    if v6 not in NAT64_PREFIX:
-        return None
-    return str(ipaddress.IPv4Address(int(v6) & 0xFFFFFFFF))
-```
-
 Multiple NAT64 addresses for the same FQDN = different NAT64 gateway nodes (load balanced), all encoding the same private IP.
 
-## PNG routing rules
+See `databricks-private-network-gateway` skill for the full Python `decode_nat64` implementation, routing rules, and PNG verification.
 
-| Connection | Result |
-|---|---|
-| FQDN in PNG destinations | Routed through PNG tunnel → private endpoint |
-| FQDN not in PNG destinations | Public internet via NAT64 |
-| Raw public IPv4 (no DNS) | Public internet via NAT64 (PNG bypassed) |
+## PNG routing (summary)
 
-PNG routing is **DNS-based** — it intercepts at DNS resolution time, not at the packet level.
+PNG routing is **DNS-based** — it intercepts at DNS resolution time, not at the packet level. FQDNs in the destination list get NAT64-encoded private IPs; FQDNs not in the list and raw IPs bypass PNG. Full routing table and destination rules are in the `databricks-private-network-gateway` skill.
 
 ## NCC egress subnets (authoritative source)
 
@@ -85,16 +67,9 @@ databricks api get \
   | jq '.egress_config.default_rules.azure_service_endpoint_rule.subnets'
 ```
 
-Example output (staging eastus2 — 11 pools across multiple subscriptions):
-```json
-[
-  ".../staging-eastus2-snp-2-compute-5/subnets/worker-subnet",
-  ".../staging-azure-eastus2-nephos10/subnets/worker-subnet",
-  ...
-]
-```
+**Why VNet rules don't work:** the subnets are in **Databricks-owned Azure subscriptions** (`7eaeac6a-...`, `85736b19-...`, etc.) that customers have no access to. You cannot read their address prefixes, add them as VNet rules, or peer with them. **Use IP-based firewall rules with the `/24` range instead.**
 
-**Why VNet rules don't work:** the subnets are in **Databricks-owned Azure subscriptions** (`7eaeac6a-...`, `85736b19-...`, etc.) that customers have no access to. You cannot read their address prefixes, add them as VNet rules, or peer with them. The NCC API only gives you the resource ID strings — not actionable for firewall configuration. **Use IP-based firewall rules with the `/24` range instead.**
+See `databricks-network-connectivity-configuration` skill for full NCC API patterns and egress IP firewall rules.
 
 ## Discovering the egress IP
 
@@ -107,29 +82,7 @@ curl -s https://ifconfig.me
 
 The returned IP is the NAT64 gateway's public IPv4 — what Azure firewall rules see for non-PNG traffic. Serverless uses a pool within `20.96.41.0/24`; whitelist the entire `/24` rather than a single IP to avoid chasing pool rotations.
 
-To whitelist the `/24` in Azure firewall rules (run from your laptop, not serverless):
-
-```bash
-# MySQL
-az mysql flexible-server firewall-rule create \
-  --resource-group "$RESOURCE_GROUP" --name "$MYSQL_SERVER_NAME" \
-  --rule-name "databricks-serverless-egress-slash24" \
-  --start-ip-address 20.96.41.0 --end-ip-address 20.96.41.255
-
-# PostgreSQL
-az postgres flexible-server firewall-rule create \
-  --resource-group "$RESOURCE_GROUP" --name "$PG_SERVER_NAME" \
-  --rule-name "databricks-serverless-egress-slash24" \
-  --start-ip-address 20.96.41.0 --end-ip-address 20.96.41.255
-
-# SQL Server
-az sql server firewall-rule create \
-  --resource-group "$RESOURCE_GROUP" --server "$SQL_SERVER_NAME" \
-  --name "databricks-serverless-egress-slash24" \
-  --start-ip-address 20.96.41.0 --end-ip-address 20.96.41.255
-```
-
-The setup scripts (`customer-3-setup-azure-*.sh`) use `SERVERLESS_EGRESS_IP_START` / `SERVERLESS_EGRESS_IP_END` variables (defaulting to the full `/24`) and pass them as a range to the `_add_*_ip_rule` helpers.
+See `databricks-network-connectivity-configuration` skill for the `az` firewall rule commands and egress subnet details.
 
 ## Verification notebook
 

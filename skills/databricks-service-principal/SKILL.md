@@ -46,10 +46,14 @@ if ! databricks secrets list-secrets "$SCOPE" --profile "$WS_PROFILE" &>/dev/nul
 fi
 
 # Load state (base64-decode required)
+# Use conditional, not 2>/dev/null, so auth/network errors are visible
 declare -A SP=([sp_name]="" [sp_scim_id]="" [client_id]="" [client_secret]="" [secret_id]="")
 
-SAVED=$(databricks secrets get-secret "$SCOPE" "$KEY" --profile "$WS_PROFILE" \
-  --output json 2>/dev/null | jq -r 'if .value then .value | @base64d else empty end')
+SAVED=""
+if databricks secrets get-secret "$SCOPE" "$KEY" --profile "$WS_PROFILE" \
+     --output json > /tmp/sp_secret.$$ 2>&1; then
+  SAVED=$(jq -r 'if .value then .value | @base64d else empty end' /tmp/sp_secret.$$)
+fi
 
 if [[ -n "$SAVED" ]]; then
   for key in sp_name sp_scim_id client_id client_secret secret_id; do

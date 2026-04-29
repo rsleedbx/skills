@@ -125,9 +125,12 @@ save_db_secret "vm-sqlserver"
 | `host_fqdn` | `VM_INTERNAL_DNS` (PNG routing) |
 | `vm_fqdn_public` | `SQL_DNS` (local CLI) |
 | `access_type` | `vm` |
-| `dba_user` | `sa` |
+| `dba__user` | `sa` |
+| `dba__password` | `<SA password>` |
 | `dba_catalog` | `master` |
 | `schema` | `dbo` |
+
+> **Double-underscore naming:** `save_db_secret` accepts `dba_user=` / `dba_password=` as input parameters. The JSON stores them nested as `dba.user` / `dba.password`. When `load_db_secret` exports to the environment, nested keys are flattened with `__`: `$dba__user`, `$dba__password`.
 
 ## UC connection — trustServerCertificate required
 

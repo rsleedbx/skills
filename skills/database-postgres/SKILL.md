@@ -273,7 +273,7 @@ Set via `pg_class.relreplident`. The lakeflow_connect reference uses `CDC_CT_MOD
 | CDC_CT_MODE | dtix | intpk |
 |-------------|------|-------|
 | `BOTH` or `CDC` | `FULL` (`f`) | `DEFAULT` (`d`) |
-| `BOTH` or `CT` | — | `DEFAULT` (`d`) |
+| `BOTH` or `CT` | `NOTHING` (`n`) — no CDC on dtix | `DEFAULT` (`d`) |
 | `NONE` | `NOTHING` (`n`) | `NOTHING` (`n`) |
 
 ```bash

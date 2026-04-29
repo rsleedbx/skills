@@ -48,23 +48,6 @@ ALTER ROLE db_ddladmin ADD MEMBER [lfc_user];
 | `db_owner` | Change Tracking, CDC, DML on all tables |
 | `db_ddladmin` | Schema evolution DDL (ALTER TABLE, CREATE INDEX) |
 
-## LakeFlow Connect DDL script URL
-
-The schema evolution DDL script is versioned and hosted by Databricks:
-
-```
-https://docs.databricks.com/aws/en/assets/files/ddl_support_objects-06ebad393ea6bc7d853d5504dc6542de.sql
-```
-
-Download and inject with `sed` to replace placeholders before running via sqlcmd:
-
-```bash
-LAKEFLOW_DDL_SCRIPT_URL="https://docs.databricks.com/aws/en/assets/files/ddl_support_objects-06ebad393ea6bc7d853d5504dc6542de.sql"
-curl -fsSL "$LAKEFLOW_DDL_SCRIPT_URL" \
-  | sed "s/@replicationUser/${LFC_USER}/g; s/@mode/CT/g" \
-  | sqlcmd -S "$HOST,$PORT" -d "$CATALOG" -U sa -P "$SA_PASS" -C
-```
-
 ## CDC requires `autocommit=True` — cannot run in a transaction
 
 `ALTER DATABASE SET CHANGE_TRACKING`, `EXEC sys.sp_cdc_enable_db`, and `EXEC sys.sp_cdc_enable_table` **cannot run inside a transaction**. If called via a database connection with autocommit=False (the default for most DB drivers), the commands fail silently or with:

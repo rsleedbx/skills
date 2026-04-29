@@ -161,5 +161,8 @@ save_db_secret "vm-mysql"
 | `host_fqdn` | `VM_INTERNAL_DNS` (private DNS, PNG routing) |
 | `vm_fqdn_public` | `SQL_DNS` (public FQDN, local CLI) |
 | `access_type` | `vm` |
-| `dba_user` | `root` |
+| `dba__user` | `root` |
+| `dba__password` | `<root password>` |
 | `dba_catalog` | `mysql` |
+
+> **Double-underscore naming:** `save_db_secret` accepts `dba_user=` / `dba_password=` as input parameters. The JSON stores them nested as `dba.user` / `dba.password`. When `load_db_secret` exports to the environment, nested keys are flattened with `__`: `$dba__user`, `$dba__password`.

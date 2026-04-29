@@ -1,9 +1,9 @@
 ---
-name: lakeflow-connect
-description: LakeFlow Connect (LFC) database configuration conventions across clouds — CDC_CT_MODE semantics, intpk/dtix table schema and purpose, required user grants per engine (MySQL/PostgreSQL/SQL Server), cross-cloud CDC entrypoints (sp_cdc vs rds_cdc vs gcloudsql_cdc), PostgreSQL replication slot cleanup, Databricks secret V2 format, UC connection JSON structure, gateway and ingestion pipeline naming. Use when configuring databases for LFC ingestion, setting up users/tables/CDC/CT, building UC connections, writing ingestion pipeline definitions, or understanding the reference table/schema/user naming conventions.
+name: databricks-lakeflow-connect
+description: Databricks LakeFlow Connect (LFC) database configuration conventions across clouds — CDC_CT_MODE semantics, intpk/dtix table schema and purpose, required user grants per engine (MySQL/PostgreSQL/SQL Server), cross-cloud CDC entrypoints (sp_cdc vs rds_cdc vs gcloudsql_cdc), PostgreSQL replication slot cleanup, Databricks secret V2 format, UC connection JSON structure, gateway and ingestion pipeline naming. Use when configuring databases for LFC ingestion, setting up users/tables/CDC/CT, building UC connections, writing ingestion pipeline definitions, or understanding the reference table/schema/user naming conventions.
 ---
 
-# LakeFlow Connect — Database Configuration
+# Databricks LakeFlow Connect — Database Configuration
 
 ## CDC_CT_MODE
 
@@ -33,48 +33,15 @@ Both tables are created in the `lfc_test_db` (or caller-specified `DB_SCHEMA`) s
 
 ## MySQL — required user grants
 
-The LFC user needs these grants for binlog CDC:
-
-```sql
--- lakeflow_connect reference uses global *.* (not schema-specific) for simplicity
-GRANT ALTER, CREATE, DROP, SELECT, INSERT, DELETE, UPDATE ON *.* TO '<lfc_user>'@'%';
-GRANT REPLICATION CLIENT ON *.* TO '<lfc_user>'@'%';
-GRANT REPLICATION SLAVE  ON *.* TO '<lfc_user>'@'%';
-```
-
-> For production, scope DDL grants to a specific schema (`<schema>.*`) rather than `*.*`.
-
-Required server parameters:
-| Parameter | Value |
-|-----------|-------|
-| `binlog_row_image` | `full` |
-| `binlog_format` | `row` |
-| `require_secure_transport` | `OFF` |
-| `sql_generate_invisible_primary_key` | `OFF` |
-| `binlog_expire_logs_seconds` | `≥ 604800` (7 days) |
+The LFC user needs binlog CDC grants (`REPLICATION CLIENT`, `REPLICATION SLAVE`, DDL) and specific server parameters (`binlog_row_image=full`, `binlog_format=row`, `require_secure_transport=OFF`, etc.). Full SQL and parameter table: see `database-mysql` skill.
 
 `endless_dml_loop` stored procedure is created in the schema for continuous load generation.
 
 ## PostgreSQL — required grants and replica identity
 
-```sql
--- User creation and grants
-CREATE USER <lfc_user> WITH PASSWORD '<password>';
-GRANT CONNECT ON DATABASE <catalog> TO <lfc_user>;
-GRANT USAGE, CREATE ON SCHEMA public TO <lfc_user>;
-GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public TO <lfc_user>;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO <lfc_user>;
--- Replication role (Azure Flexible Server)
-ALTER ROLE <lfc_user> WITH REPLICATION;
--- AWS RDS: GRANT rds_replication TO <lfc_user>;
-```
+Full grant SQL, idempotent user creation, and platform variants (`ALTER ROLE WITH REPLICATION` vs `GRANT rds_replication`): see `database-postgres` skill.
 
-Required server parameters:
-| Parameter | Value |
-|-----------|-------|
-| `wal_level` | `logical` |
-| `require_secure_transport` | `off` |
+Required server parameters: `wal_level=logical`, `require_secure_transport=off`.
 
 **Replica identity** drives what is included in CDC events:
 
@@ -89,13 +56,7 @@ ALTER TABLE intpk REPLICA IDENTITY DEFAULT;
 ALTER TABLE dtix  REPLICA IDENTITY FULL;   -- or NOTHING for CT-only mode
 ```
 
-**Table ownership:** Tables must be owned by `lfc_user` for `ALTER TABLE ... REPLICA IDENTITY` to succeed. Create tables as `lfc_user` (not DBA), or transfer ownership:
-```sql
-DO $$ DECLARE r RECORD;
-BEGIN FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='public'
-  LOOP EXECUTE 'ALTER TABLE public.' || r.tablename || ' OWNER TO lfc_user'; END LOOP;
-END $$;
-```
+**Table ownership:** Tables must be owned by `lfc_user` for `ALTER TABLE ... REPLICA IDENTITY` to succeed. Create tables as `lfc_user` (not DBA), or transfer ownership with `ALTER TABLE ... OWNER TO lfc_user`.
 
 ## PostgreSQL — replication slot cleanup
 
@@ -114,63 +75,21 @@ Uncleared slots hold WAL and grow the disk indefinitely. Always drop slots when 
 
 ## SQL Server — CT and CDC setup
 
-**Database-level CT** — requires dynamic SQL for the database name:
-```sql
-IF EXISTS (SELECT * FROM sys.change_tracking_databases WHERE database_id=DB_ID())
-    SELECT 'CT already enabled'
-ELSE
-  BEGIN
-    EXEC ('ALTER DATABASE <catalog> SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON)');
-  END
-```
+Full T-SQL for database-level CT, database-level CDC (multi-platform ladder: `sp_cdc_enable_db` / `gcloudsql_cdc_enable_db` / `rds_cdc_enable_db`), table-level CT (`TRACK_COLUMNS_UPDATED = ON` required), and table-level CDC: see `database-sqlserver` skill.
 
-**Database-level CDC** — portable multi-platform ladder (run all three; only the one matching the platform succeeds):
-```sql
-SET NOCOUNT ON  -- required; prevents "Invalid cursor state" errors
-go
-IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
-  EXEC sys.sp_cdc_enable_db                         -- Azure SQL / on-premise
-go
-IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
-  EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>' -- GCP Cloud SQL
-go
-IF NOT EXISTS (SELECT name FROM sys.databases WHERE name=DB_NAME() AND is_cdc_enabled=1)
-  EXEC msdb.dbo.rds_cdc_enable_db '<catalog>'       -- AWS RDS
-go
-```
-
-**Table-level CT** — always include `TRACK_COLUMNS_UPDATED = ON`:
-```sql
-ALTER TABLE [<schema>].[intpk] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
-```
-
-**Table-level CDC:**
-```sql
-EXEC sys.sp_cdc_enable_table
-  @source_schema = N'<schema>', @source_name = N'dtix',
-  @role_name = NULL, @supports_net_changes = 0;
-```
+**LFC-specific flags:**
+- `CDC_CT_MODE=BOTH|CT` → enable CT on `intpk`; disable CDC on `dtix` (set `REPLICA IDENTITY NOTHING`)
+- `CDC_CT_MODE=BOTH|CDC` → enable CDC on database and `dtix`
+- **Auto-fallback:** If CDC cannot be enabled (Express/Web edition), fall back to `CDC_CT_MODE=CT`
 
 **Schema evolution objects:**
 - Use `ddl_support_objects.sql` for `CDC_CT_MODE=BOTH|CDC`
 - Use `ddl_support_objects_ct_only.sql` for `CDC_CT_MODE=CT`
 - Inject `@replicationUser` and `@mode` via `sed` before running with `sqlcmd`.
 
-**Auto-fallback:** If CDC cannot be enabled (Express/Web edition), fall back to `CDC_CT_MODE=CT`.
-
 ## SQL Server — LFC user grants
 
-```sql
--- In master database
-CREATE LOGIN [<lfc_user>] WITH PASSWORD = '<password>';
-
--- In application database
-CREATE USER [<lfc_user>] FOR LOGIN [<lfc_user>];
-ALTER ROLE db_owner ADD MEMBER [<lfc_user>];
-ALTER ROLE db_ddladmin ADD MEMBER [<lfc_user>];
-```
-
-`db_owner` is required for CT and CDC operations. `db_ddladmin` supports schema evolution DDL.
+`db_owner` + `db_ddladmin` roles on the application database. Full SQL: see `database-sqlserver` skill.
 
 ## UC connection JSON structure
 
@@ -203,10 +122,10 @@ For every database, create **two** connections to enable side-by-side PNG vs non
 
 | Connection suffix | Host | Routes via PNG? |
 |------------------|------|-----------------|
-| `<prefix>-<db>` | private FQDN / internal DNS | Yes (NAT64 intercepts) |
-| `<prefix>-<db>-public` | public IP or public FQDN | No (direct egress) |
+| `<prefix>-<db>` | private FQDN / internal DNS | Yes (NAT64 intercepts private IP) |
+| `<prefix>-<db>-public` | public IP **or** public FQDN | No (resolves to public IP, bypasses NAT64) |
 
-The public connection uses the raw IP address (not FQDN) to bypass PNG's NAT64 interception — DNS resolution is what triggers PNG interception.
+**IP vs FQDN for the public connection:** PNG's NAT64 intercepts hostnames that resolve to **private IP addresses**. A public FQDN that resolves to a public IP is **not intercepted** and works for bypass. A raw IP (e.g. `20.97.1.2`) also works. Either form is acceptable for the `-public` connection. The only requirement is that the address does not resolve to a private RFC1918 address.
 
 ## Databricks secret V2 format
 
