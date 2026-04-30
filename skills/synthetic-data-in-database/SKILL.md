@@ -688,21 +688,83 @@ Batch 9: seed values 9,000,000.. 9,999,999 → INSERT SELECT pk + 9000000 FROM f
 
 **Do not add external parallelism** (multiple connections running batches concurrently). The database already parallelizes the INSERT…SELECT internally across its CPU and I/O threads. Multiple connections cause lock contention on AUTO_INCREMENT and the UNIQUE index and are slower overall.
 
-### Building fkr__seed at 1M rows via doubling ✓ (MySQL 8.0.44-azure)
+### Building fkr__seed at 1M rows — bootstrap then double
 
-Start from 10,000 rows (initial `fkr__seed` size) and double 7 times — total 8.5s:
+**Two-phase pattern (all engines without `generate_series`):**
+1. **Bootstrap** — create a small seed (1K rows) using a VALUES cross join or tally CTE.
+2. **Double** — repeatedly `INSERT INTO fkr__seed SELECT pk + COUNT FROM fkr__seed` until 1M rows.
+
+**Why not a pure geometric CTE?**
+The standard 4-level geometric CTE (`e0 UNION ALL...→ e4`) produces at most **65,536 rows** (2¹⁶). `TOP 1000000` on a 65K source returns only 65K — the CTE cannot bootstrap to 1M in a single statement.
+✓ SQL Azure 12.0.2000.8: confirmed — `TOP 1000000` on e0→e4 CTE inserted exactly 65,536 rows, not 1M.
+
+To reach 1M: use the doubling pattern from a small seed. It is also idempotent (check current count before each step).
+
+#### Phase 1 — Bootstrap 1K rows (VALUES cross join, all engines)
 
 ```sql
--- Start: pk 0..9999 (10k rows)
-INSERT INTO fkr__seed (pk) SELECT pk + 10000   FROM fkr__seed;              -- → 20k   (0.09s)
-INSERT INTO fkr__seed (pk) SELECT pk + 20000   FROM fkr__seed;              -- → 40k   (0.22s)
-INSERT INTO fkr__seed (pk) SELECT pk + 40000   FROM fkr__seed;              -- → 80k   (0.37s)
-INSERT INTO fkr__seed (pk) SELECT pk + 80000   FROM fkr__seed;              -- → 160k  (0.68s)
-INSERT INTO fkr__seed (pk) SELECT pk + 160000  FROM fkr__seed;              -- → 320k  (1.34s)
-INSERT INTO fkr__seed (pk) SELECT pk + 320000  FROM fkr__seed;              -- → 640k  (2.73s)
-INSERT INTO fkr__seed (pk) SELECT pk + 640000  FROM fkr__seed WHERE pk < 360000; -- → 1M (3.30s)
--- Result: pk 0..999999 (1,000,000 rows), 8.5s total
+-- Works on MySQL, SQL Server, PostgreSQL, Oracle
+-- 10 × 10 × 10 = 1,000 rows
+WITH d(x) AS (
+  SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5
+  UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10
+)
+INSERT INTO fkr__seed (pk)
+SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1   -- SQL Server / PostgreSQL
+-- MySQL: use (a.x - 1)*100 + (b.x - 1)*10 + (c.x - 1) AS pk
+FROM d a CROSS JOIN d b CROSS JOIN d c;
+-- → 1,000 rows (pk 0..999)
 ```
+
+#### Phase 2 — Double to 1M (10 steps, idempotent)
+
+```sql
+-- Generic: run once per step; check @cnt / @c before inserting to skip if already done
+-- Each step: INSERT pk + current_count FROM fkr__seed (shifts the seed window)
+DECLARE @c INT; SELECT @c = COUNT(*) FROM fkr__seed;  -- 1000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 2000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 4000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 8000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 16000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 32000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 64000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 128000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 256000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed; SELECT @c=COUNT(*) FROM fkr__seed;  -- 512000
+INSERT INTO fkr__seed SELECT pk + @c FROM fkr__seed WHERE pk < (1000000 - @c);           -- 1M
+-- Result: pk 0..999999 (1,000,000 rows)
+```
+
+**Observed timings:**
+
+✓ MySQL 8.0.44-azure — start from 10K (7 doublings), **8.5s total** DB time:
+
+| Step | DB time |
+|------|---------|
+| 10k → 20k | 0.09s |
+| 20k → 40k | 0.22s |
+| 40k → 80k | 0.37s |
+| 80k → 160k | 0.68s |
+| 160k → 320k | 1.34s |
+| 320k → 640k | 2.73s |
+| 640k → 1M | 3.30s |
+| **Total** | **8.5s** |
+
+✓ SQL Azure 12.0.2000.8 — start from 1K (10 doublings), **~8.9s total** elapsed (temp table, clustered PK):
+
+| Step | Elapsed |
+|------|---------|
+| 1K→2K | 5ms |
+| 2K→4K | 10ms |
+| 4K→8K | 20ms |
+| 8K→16K | 39ms |
+| 16K→32K | 87ms |
+| 32K→64K | 336ms |
+| 64K→128K | 683ms |
+| 128K→256K | 631ms |
+| 256K→512K | 4,293ms |
+| 512K→1M (top-off) | — |
+| **Total** | **~8.9s** |
 
 ### Choosing batch size
 

@@ -1,6 +1,17 @@
 ---
 name: shell-script-practices
-description: Bash script conventions — run() / run_log() ("$@" never "${*}"); abort with kill -INT $$; prerequisites for-bin + command -v loop; ${VAR:?msg}, ${VAR:+ …}, argv arrays + run "${cmd[@]}", inline single-command bodies; always use ${var} braces in echo/string contexts to guard against non-ASCII byte bleed into variable names; never use 2>/dev/null on data-fetching commands; set -u in all scripts including sourced helpers; safe for-loops over arrays not unquoted vars; capture pipeline output before piping to avoid swallowed exit codes; use --output none not >/dev/null for az CLI; extract shared helpers instead of duplicating across scripts; validate DB credentials before use and reset only on failure. Use when writing or refactoring any .sh scripts, CLI wrappers, or shell automation.
+description: >-
+  Bash script conventions — run() / run_log() ("$@" never "${*}"); abort with kill -INT $$;
+  prerequisites for-bin + command -v loop; ${VAR:?msg}, ${VAR:+ …}, argv arrays + run "${cmd[@]}",
+  inline single-command bodies; always use ${var} braces in echo/string contexts to guard against
+  non-ASCII byte bleed into variable names; never use 2>/dev/null on data-fetching commands; set -u
+  in all scripts including sourced helpers; safe for-loops over arrays not unquoted vars; capture
+  pipeline output before piping to avoid swallowed exit codes; use --output none not >/dev/null for
+  az CLI; extract shared helpers instead of duplicating across scripts; validate DB credentials
+  before use and reset only on failure. For REST API CLI wrappers (az, aws, gcloud, databricks,
+  mysql, psql) — CMD_EXIT_ON_ERROR / CMD_TIMEOUT / CMD_OUT_SUFFIX / CMD_MASK_SECRETS — see the
+  shell-cmd-wrapper skill. Use when writing or refactoring any .sh scripts, CLI wrappers, or shell
+  automation.
 ---
 
 # Shell script practices
@@ -313,6 +324,14 @@ if az network private-endpoint show … &>/dev/null; then
   echo "already exists — skipping"
 fi
 ```
+
+## Cloud CLI wrappers — save stdout/stderr, never swallow
+
+See the **`shell-cmd-wrapper`** skill for the full `CMD` + `CMD_CONT_OR_EXIT` implementation, usage patterns, and temp file reference.
+
+Key principle: never use `$()` or `2>/dev/null` for REST API calls (`az`, `aws`, `gcloud`, `databricks`, `mysql`, etc.) — they silently swallow errors and can hang forever on API outages. Use `CMD` instead, which derives `/tmp/<binary>_stdout.<PID>` from `basename $1`, prints the command with masking, supports `CMD_TIMEOUT` for hang prevention, and routes errors through `CMD_CONT_OR_EXIT`.
+
+---
 
 ## Extract shared helpers — never duplicate functions across scripts
 

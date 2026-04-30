@@ -111,6 +111,55 @@ Canonical structure returned by `_build_uc_conn_json` in `uc-connection-helpers.
 
 SQL Server adds `"trustServerCertificate": "true"` to `options` (self-signed cert on most VMs and Azure SQL).
 
+## UC connection options — verify before assuming
+
+**Always probe the API to discover the current supported options list.** The options whitelist is enforced server-side and changes across Databricks versions. Do not assume an option is available; do not assume it is absent.
+
+### How to probe supported options for a connection type
+
+Send an intentionally unknown option. The error response lists every supported option:
+
+```bash
+databricks -p $PROFILE api post "/api/2.1/unity-catalog/connections" \
+  --json '{
+    "name": "_probe_options",
+    "connection_type": "MYSQL",
+    "options": {"host":"x","port":"3306","user":"x","password":"x","_probe_":"true"}
+  }' 2>&1
+# Error: CONNECTION/CONNECTION_MYSQL does not support the following option(s): _probe_.
+# Supported options: userProvidedServerCertificate,host,port,trustServerCertificate,user,password.
+```
+
+If the probe accidentally creates a connection (a non-conflicting valid payload), delete it:
+```bash
+databricks -p $PROFILE api delete "/api/2.1/unity-catalog/connections/_probe_options"
+```
+
+Replace `"MYSQL"` with `"POSTGRESQL"` or `"SQLSERVER"` to discover options for those types.
+
+### Verified options — last checked Apr 2026
+
+> **WARNING — ASSUMED CURRENT:** The table below reflects a live API probe on Apr 30 2026.
+> Options lists change as Databricks adds features. **Re-run the probe above** before relying on
+> this table, especially before concluding that a desired option is unsupported.
+
+| connection_type | Supported options | Notes |
+|-----------------|-------------------|-------|
+| `MYSQL` | `host`, `port`, `user`, `password`, `trustServerCertificate`, `userProvidedServerCertificate` | No JDBC pass-through. `useCompression`, `sslMode`, `connectTimeout` are **not** accepted. |
+| `POSTGRESQL` | probe to verify | — |
+| `SQLSERVER` | probe to verify | `trustServerCertificate` confirmed accepted |
+
+### Consequences of the MYSQL options restriction
+
+> **ASSUMED TRUE (verified Apr 2026):** LFC connects to MySQL without protocol-level compression
+> because `useCompression` is not in the supported options. If Databricks adds compression support
+> in future, re-probe and update the byte measurement methodology accordingly.
+
+Because compression is unavailable:
+- `Bytes_sent` in `performance_schema.status_by_account` equals actual pre-TLS wire bytes — no compression layer between MySQL and the JDBC client.
+- `Bytes_sent` is therefore a direct measure of JDBC read volume and is comparable across runs without a decompression factor.
+- TLS (if negotiated) encrypts bytes *after* MySQL counts them — `Bytes_sent` is always pre-TLS. The counter is accurate regardless of `trustServerCertificate` setting.
+
 PATCH operations (update) must omit `connection_type`:
 ```bash
 _patch_json=$(echo "$_create_json" | jq 'del(.connection_type)')
