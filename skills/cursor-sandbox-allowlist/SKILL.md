@@ -60,28 +60,44 @@ bash /tmp/ss_run.sh -Q "..."  # first token = bash            → allowlist bash
 
 **Always add `bash` to the allowlist** when any workflow uses wrapper scripts or multi-command pipelines.
 
-### Mistake 2 — omitting `required_permissions` for commands that need network
+### Mistake 2 — first token not allowlisted when using `required_permissions: ["all"]`
 
-The command allowlist prevents the "Run" prompt but does **not** automatically grant unrestricted network. Commands on the allowlist still run in a sandbox with limited network unless `required_permissions: ["all"]` is also specified.
+The allowlist check matches the **first token** of the Shell command string. If the first token is a shell built-in (`export`, `source`, `set`) or a non-allowlisted binary, then `required_permissions: ["all"]` **triggers a "Run" prompt**.
 
-| Command on allowlist | `required_permissions` | Result |
-|---------------------|----------------------|--------|
-| ✓ | none | No "Run" prompt, but **network still limited** (sandbox) |
-| ✓ | `["all"]` | No "Run" prompt, **fully outside sandbox** ✓ |
-| ✗ | `["all"]` | "Run" prompt shown, then outside sandbox |
-| ✗ | none | "Run" prompt shown, runs in sandbox |
+Without `required_permissions`, network access remains limited even if the first token is allowlisted.
 
+| First token | `required_permissions` | Result |
+|-------------|----------------------|--------|
+| allowlisted (e.g. `bash`, `databricks`) | `["all"]` | **No prompt, full network** ✓ |
+| allowlisted | none | No prompt, but **network limited** ✗ |
+| NOT allowlisted (`export`, `source`, script path) | `["all"]` | **"Run" prompt shown** ✗ |
+| NOT allowlisted | none | "Run" prompt shown, network limited ✗ |
+
+**Rule**: to get no "Run" prompt AND full network, the Shell command must:
+1. Start with an allowlisted binary as the first token
+2. Include `required_permissions: ["all"]`
+
+**Pattern** — wrap multi-step scripts in `bash -c` so `bash` is the first token:
+
+```bash
+# command parameter starts with "bash":
+bash -c '
+export WORKSPACE_PROFILE="huaming-png-eastus2-sl-ws"
+export DATABRICKS_TOKEN=$(databricks auth token -p "$WORKSPACE_PROFILE" | jq -r .access_token)
+sqlcmd -S host,1433 -U sa -P "$SA_PASS" -Q "SELECT 1"
+'
 ```
-# Correct for commands needing full network access (no prompt if allowlisted):
-required_permissions: ["all"]
 
-# Wrong — still sandboxed, API calls to non-standard domains will fail:
-(no required_permissions field)
+**Alternatively**, for single-binary calls, just start directly with the allowlisted binary:
+```bash
+# No prompt, full network — "sqlcmd" is first token and is allowlisted:
+sqlcmd -S host,1433 -U sa -P pass -Q "SELECT 1"
 ```
 
-**Rule**: for allowlisted commands that call external APIs (Databricks, Azure, GCP), always include `required_permissions: ["all"]`. This grants full access with no "Run" prompt as long as the command's first token is on the allowlist.
-
-**Verified** (2026-04-30): `databricks pipelines get ... -p ...` with `required_permissions: ["all"]` ran "outside the sandbox (no restrictions)" with no prompt because `databricks` is allowlisted.
+**Verified** (2026-04-30):
+- `databricks pipelines get ...` (first token: `databricks`) + `required_permissions: ["all"]` → no prompt, outside sandbox ✓
+- Multi-line script starting with `export` + `required_permissions: ["all"]` → "Run" prompt shown ✗
+- Any command without `required_permissions` → network limited even if allowlisted ✗
 
 ## Current allowlist (robert.lee's machine)
 

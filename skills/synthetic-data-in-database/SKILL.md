@@ -91,6 +91,29 @@ For detail on building fkr__seed (bootstrap + doubling pattern), batch loop patt
 
 ---
 
+## Testing isolation — do not load and benchmark simultaneously
+
+**Rule: complete all bulk data loads before running any read-performance benchmark.**
+
+Bulk `INSERT … SELECT` batches compete with read workloads for:
+- CPU (sort, hash, expression evaluation)
+- I/O bandwidth (buffer pool pressure forces reads from disk)
+- Network bandwidth (database → client) for read paths
+- Lock manager (WAL/redo flushing on writes delays read commits on PostgreSQL)
+
+Running a LakeFlow Connect ingestion benchmark while the database is still loading `intpk_1b` in the background will inflate the measured ingestion time and produce results that are not reproducible on an idle server.
+
+**Checklist before starting a benchmark:**
+1. Verify all target tables have reached their intended row count (use `MAX(indexed_col)`, not `COUNT(*)`).
+2. Confirm no background load processes are running (`SHOW PROCESSLIST` on MySQL, `pg_stat_activity` on PostgreSQL, `sys.dm_exec_requests` on SQL Server).
+3. Wait at least 30 seconds after the last write batch completes to allow checkpoint/WAL flush to settle.
+
+**If a load is still running**, either:
+- Wait for it to complete before benchmarking, or
+- Benchmark a different table/DB that is not under load, then return for the loaded table later.
+
+---
+
 ## Contiguous range invariant
 
 - **Inserts** extend the high end; **deletes** shrink from the low or high end only
