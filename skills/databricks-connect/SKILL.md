@@ -1,6 +1,13 @@
 ---
 name: databricks-connect
-description: Set up Databricks Connect for local notebooks and .py files — spark/dbutils injection, portable .py pattern (bootstrap guard + pass as args), what runs locally vs remotely, Spark Connect vs Databricks Connect, DatabricksSession, WorkspaceClient auth conflict, GCP URLs. Use when creating notebooks or .py scripts that run against a remote workspace, confused about spark/dbutils availability locally, or want code that works identically in workspace notebooks and local Connect.
+description: >-
+  Set up Databricks Connect for local notebooks and .py files — spark/dbutils injection, portable
+  .py pattern (bootstrap guard + pass as args), what runs locally vs remotely, Spark Connect vs
+  Databricks Connect, DatabricksSession, WorkspaceClient auth conflict, GCP URLs, serverless_compute_id=auto,
+  multiple workspaces via named profiles, Typer --profile pattern. Use when creating notebooks or
+  .py scripts that run against a remote workspace, confused about spark/dbutils availability locally,
+  setting up Connect on a new machine or new profile, switching workspaces, or debugging
+  NameError/spark or "Cluster id or serverless are required" errors.
 ---
 
 # Databricks Connect
@@ -92,6 +99,8 @@ brew tap databricks/tap && brew install databricks
 databricks auth login --configure-serverless --host https://<workspace>.azuredatabricks.net
 ```
 
+`--configure-serverless` writes `serverless_compute_id = auto` to the profile automatically. Without it, Connect cannot attach to compute.
+
 Resulting `~/.databrickscfg`:
 ```ini
 [DEFAULT]
@@ -111,9 +120,88 @@ pip uninstall pyspark -y
 pip install "databricks-connect==17.3.*"   # only if installing manually; match X.Y to your runtime
 ```
 
-### 3. Verify
+### 3. Verify — `pyspark` REPL (quickest check)
 
-See [test-template.md](test-template.md) for the full verification script.
+```bash
+pyspark
+```
+
+Expected output confirms the connection:
+```
+Connected to the Databricks Connect server '<workspace>.azuredatabricks.net'.
+SparkSession available as 'spark'.
+```
+
+### 4. Verify — standalone `.py` script
+
+```python
+from databricks.connect import DatabricksSession
+
+spark = DatabricksSession.builder.getOrCreate()   # uses DEFAULT profile
+spark.read.table("samples.nyctaxi.trips").show(5)
+```
+
+`samples.nyctaxi.trips` is available in all workspaces — no setup required. See [test-template.md](test-template.md) for the full verification script.
+
+---
+
+## Multiple workspaces — named profiles
+
+Each workspace gets its own `[PROFILE]` block with its own `host` and `serverless_compute_id = auto`.
+
+```ini
+# ~/.databrickscfg
+[DEFAULT]
+host                  = https://prod-workspace.azuredatabricks.net
+serverless_compute_id = auto
+auth_type             = databricks-cli
+
+[DEV]
+host                  = https://dev-workspace.azuredatabricks.net
+serverless_compute_id = auto
+auth_type             = databricks-cli
+```
+
+Use the profile in code:
+```python
+spark = DatabricksSession.builder.profile("DEV").getOrCreate()
+```
+
+Use the profile with the CLI:
+```bash
+databricks auth login --configure-serverless --host https://dev-workspace.azuredatabricks.net --profile DEV
+```
+
+`DatabricksSession.builder.profile(name)` and `WorkspaceClient(profile=name)` both read from the same `[name]` block — pass the same string to both.
+
+---
+
+## CLI scripts with `--profile` — Typer pattern
+
+Use **Typer** to add a `--profile` option that mirrors the Databricks CLI's own `--profile` flag:
+
+```python
+import typer
+from databricks.connect import DatabricksSession
+from databricks.sdk import WorkspaceClient
+
+
+def main(
+    profile: str = typer.Option("DEFAULT", help="~/.databrickscfg profile name."),
+) -> None:
+    spark = DatabricksSession.builder.profile(profile).getOrCreate()
+    w = WorkspaceClient(profile=profile)
+    spark.read.table("samples.nyctaxi.trips").show(5)
+
+
+if __name__ == "__main__":
+    typer.run(main)
+```
+
+```bash
+python script.py                   # uses DEFAULT profile
+python script.py --profile DEV     # uses [DEV] block
+```
 
 ---
 
@@ -157,3 +245,4 @@ Databricks Connect exports `DATABRICKS_AUTH_TYPE=metadata-service`. `WorkspaceCl
 | `NameError: name 'dbutils'` | Only in plain `.py` without active Connect session; use `databricks.sdk.runtime.dbutils` |
 | `pyspark` installed alongside `databricks-connect` | They conflict — uninstall `pyspark` |
 | Wrong project root | Walk up from `Path.cwd()` to find `src/` directory |
+| `Exception: Cluster id or serverless are required but were not specified` | Named profile is missing `serverless_compute_id = auto` — run `databricks auth login --configure-serverless --profile <name>` or add the key manually to `~/.databrickscfg` |

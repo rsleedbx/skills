@@ -1,6 +1,6 @@
 ---
 name: azure-vm-sqlserver
-description: SQL Server 2022 on Azure Ubuntu VM for LakeFlow Connect — installation via az vm run-command, mssql-conf setup, validate-then-reset SA password pattern (stop/mssql-conf/start via az vm run-command), SQL Server listens on 0.0.0.0:1433 by default (no bind-address change), direct source sqlserver-configure.sh. Use when setting up or debugging SQL Server on an Azure VM, fixing SA login failures, or configuring LFC access. See database-sqlserver for SQL Server login/user architecture, CT/CDC setup, sqlcmd conventions, and trustServerCertificate.
+description: SQL Server 2022 on Azure Ubuntu VM — installation via az vm run-command, mssql-conf setup, validate-then-reset SA password pattern (stop/mssql-conf/start via az vm run-command), SQL Server listens on 0.0.0.0:1433 by default (no bind-address change), direct source sqlserver-configure.sh. Use when setting up or debugging SQL Server on an Azure VM, fixing SA login failures, or configuring database user access. See database-sqlserver for SQL Server login/user architecture, CT/CDC setup, sqlcmd conventions, and trustServerCertificate.
 ---
 
 # Azure VM SQL Server — LFC Setup

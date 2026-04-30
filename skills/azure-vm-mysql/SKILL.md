@@ -1,6 +1,6 @@
 ---
 name: azure-vm-mysql
-description: MySQL 8 on Azure Ubuntu VM for LakeFlow Connect — installation via az vm run-command, bind-address=0.0.0.0 (Azure VM networking), root@% user creation, debian-sys-maint admin channel via az vm run-command, validate-then-reset root password pattern, LFC user pre-seeding, direct source mysql-configure.sh from laptop. Use when setting up or debugging MySQL on an Azure VM, fixing connection-refused errors, syncing root passwords, or configuring LFC access. See database-mysql for MySQL grants, binlog parameters, bind-address config, and auth_socket details.
+description: MySQL 8 on Azure Ubuntu VM — installation via az vm run-command, bind-address=0.0.0.0 (Azure VM networking), root@% user creation, debian-sys-maint admin channel via az vm run-command, validate-then-reset root password pattern, database user pre-seeding, direct source mysql-configure.sh from laptop. Use when setting up or debugging MySQL on an Azure VM, fixing connection-refused errors, syncing root passwords, or configuring database user access. See database-mysql for MySQL grants, binlog parameters, bind-address config, and auth_socket details.
 ---
 
 # Azure VM MySQL — LFC Setup

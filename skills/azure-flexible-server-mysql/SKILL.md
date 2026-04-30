@@ -1,6 +1,6 @@
 ---
 name: azure-flexible-server-mysql
-description: Azure MySQL Flexible Server setup for LakeFlow Connect — idempotent bash scripts, parameter API field name (.currentValue not .value), subnet cleanup, LFC user pre-seeding, configure-before-PE section ordering. Use when writing or editing setup scripts for Azure MySQL Flexible Server, managing firewall rules and private endpoints, or debugging Azure parameter idempotency. See database-mysql for MySQL grants, binlog parameters, auth_socket, debian-sys-maint, and bind-address.
+description: Azure MySQL Flexible Server provisioning — idempotent bash scripts, parameter API field name (.currentValue not .value), subnet cleanup, database user pre-seeding, configure-before-PE section ordering. Use when writing or editing setup scripts for Azure MySQL Flexible Server, managing firewall rules and private endpoints, or debugging Azure parameter idempotency. See database-mysql for MySQL grants, binlog parameters, auth_socket, debian-sys-maint, and bind-address.
 ---
 
 # Azure MySQL Flexible Server — LFC Setup

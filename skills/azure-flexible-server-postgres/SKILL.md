@@ -1,6 +1,6 @@
 ---
 name: azure-flexible-server-postgres
-description: Azure PostgreSQL Flexible Server setup for LakeFlow Connect — idempotent bash scripts, parameter API field name (.value not .currentValue for Postgres), subnet cleanup, LFC user pre-seeding, configure-before-PE section ordering. Use when writing or editing setup scripts for Azure PostgreSQL Flexible Server, managing firewall rules, private endpoints, Unity Catalog connections, or debugging Azure parameter idempotency. See database-postgres for PostgreSQL grants, WAL parameters, replica identity, pg_hba.conf, and replication slots.
+description: Azure PostgreSQL Flexible Server provisioning — idempotent bash scripts, parameter API field name (.value not .currentValue for Postgres), subnet cleanup, database user pre-seeding, configure-before-PE section ordering. Use when writing or editing setup scripts for Azure PostgreSQL Flexible Server, managing firewall rules, private endpoints, Unity Catalog connections, or debugging Azure parameter idempotency. See database-postgres for PostgreSQL grants, WAL parameters, replica identity, pg_hba.conf, and replication slots.
 ---
 
 # Azure PostgreSQL Flexible Server — LFC Setup

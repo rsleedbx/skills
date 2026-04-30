@@ -157,29 +157,42 @@ curl -s -X POST \
 
 ```bash
 SS_ID="<spreadsheet_id>"
-RANGE="Sheet1!A1:D10"   # A1 notation
+RANGE="Sheet1!A1:Z100"   # A1 notation — use wide range to catch all columns
 
 curl -s -H "Authorization: Bearer $TOKEN" \
+  -H "x-goog-user-project: $GCP_PROJECT" \
   "https://sheets.googleapis.com/v4/spreadsheets/${SS_ID}/values/${RANGE}" \
   | jq '.values'
 ```
 
-⚠ not tested — same ADC auth pattern as Docs.
+✓ tested — returns a JSON array of rows, each row is an array of cell strings. Trailing empty cells are omitted (row arrays are shorter than the header). Always include `x-goog-user-project` header.
 
 ### Write cell range
 
 ```bash
 SS_ID="<spreadsheet_id>"
-RANGE="Sheet1!A1"
+RANGE="Sheet1!E5:G5"   # A1 notation — single cell or range
 
 curl -s -X PUT \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "x-goog-user-project: $GCP_PROJECT" \
   "https://sheets.googleapis.com/v4/spreadsheets/${SS_ID}/values/${RANGE}?valueInputOption=RAW" \
-  -d '{"values": [["value1", "value2"], ["value3", "value4"]]}'
+  -d '{"values": [["value1", "value2", "value3"]]}'
 ```
 
-⚠ not tested.
+✓ tested — response includes `updatedRange`, `updatedRows`, `updatedColumns`, `updatedCells`. Always include `x-goog-user-project` header.
+
+**Finding the right row number** — when writing to a specific row matched by key columns (e.g. database + network + row_count), read the sheet first, find the matching row index, then write:
+
+```bash
+_row_num=$(curl -s -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $GCP_PROJECT" \
+  "https://sheets.googleapis.com/v4/spreadsheets/${SS_ID}/values/Sheet1!A1:D200" \
+  | jq -r --arg key1 "azure-mysql" --arg key2 "public" --arg key3 "10,000,000" \
+    '.values | to_entries[]
+     | select(.value[0]==$key1 and .value[1]==$key2 and .value[3]==$key3)
+     | (.key + 2)')   # +1 for 0-indexed, +1 for header row = +2 total
+```
 
 ### Append rows
 

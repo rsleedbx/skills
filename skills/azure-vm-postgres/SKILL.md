@@ -1,6 +1,6 @@
 ---
 name: azure-vm-postgres
-description: PostgreSQL 16 on Azure Ubuntu VM for LakeFlow Connect — installation via az vm run-command, listen_addresses=* + pg_hba.conf for remote access via az vm run-command, POSIX sh compatibility for inline scripts (/bin/sh not bash), generate-before-validate pattern for empty passwords, validate-then-reset postgres password via peer-auth + az vm run-command, direct source pg-configure.sh. Use when setting up or debugging PostgreSQL on an Azure VM, fixing connection-refused errors, syncing postgres passwords, or configuring LFC access. See database-postgres for PostgreSQL grants, WAL parameters, replica identity, peer auth, and scram-sha-256 details.
+description: PostgreSQL 16 on Azure Ubuntu VM — installation via az vm run-command, listen_addresses=* + pg_hba.conf for remote access via az vm run-command, POSIX sh compatibility for inline scripts (/bin/sh not bash), generate-before-validate pattern for empty passwords, validate-then-reset postgres password via peer-auth + az vm run-command, direct source pg-configure.sh. Use when setting up or debugging PostgreSQL on an Azure VM, fixing connection-refused errors, syncing postgres passwords, or configuring database user access. See database-postgres for PostgreSQL grants, WAL parameters, replica identity, peer auth, and scram-sha-256 details.
 ---
 
 # Azure VM PostgreSQL — LFC Setup

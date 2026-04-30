@@ -1,6 +1,6 @@
 ---
 name: azure-vm
-description: Azure VM provisioning for LakeFlow Connect testing — Ubuntu VM creation, static public IP, NSG rules (VirtualNetwork + serverless egress + local IP), Azure Policy NSG-at-NIC enforcement before public IP association, dual DNS exports (public FQDN vs internal hostname), PNG routing rules for VM-hosted databases. Use when creating Azure VMs for database hosting, adding public IPs to existing VMs, configuring NSG rules, or setting up PNG routing for VM databases.
+description: Azure VM provisioning for database hosting and testing — Ubuntu VM creation, static public IP, NSG rules (VirtualNetwork + serverless egress + local IP), Azure Policy NSG-at-NIC enforcement before public IP association, dual DNS exports (public FQDN vs internal hostname), PNG routing rules for VM-hosted databases. Use when creating Azure VMs for database hosting, adding public IPs to existing VMs, configuring NSG rules, or setting up PNG routing for VM databases.
 ---
 
 # Azure VM — LFC Setup
