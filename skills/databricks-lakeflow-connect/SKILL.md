@@ -194,6 +194,33 @@ Canonical fields stored in the Databricks secret scope (JSON, base64-encoded):
 | `access_type` | `vm` / `flexible` / `azure_sql` | Where the DB is hosted |
 | `vm_fqdn_public` | `robert-lee-mysql-vm.eastus2.cloudapp.azure.com` | VM only: public FQDN for local CLI |
 
+## One pipeline per UC schema (streaming table ownership)
+
+**Constraint**: a Databricks streaming table can only be owned and written by **one pipeline**. If two pipelines target the same UC schema, they will conflict on any table with the same name.
+
+**Failure mode**: if `azure-mysql` and `azure-postgres` pipelines both use schema `db_ingest_public`, they both try to create `db_ingest_public.intpk_100m` — the second pipeline to run will fail with an ownership conflict.
+
+**Rule**: give each pipeline its own UC schema. Include the source DB key in the schema name:
+
+```
+db_ingest_{db_key}_{routing}
+```
+
+| Pipeline | UC schema |
+|---|---|
+| azure-mysql / public | `db_ingest_azure_mysql_public` |
+| azure-mysql / png | `db_ingest_azure_mysql_png` |
+| azure-postgres / public | `db_ingest_azure_postgres_public` |
+| azure-postgres / png | `db_ingest_azure_postgres_png` |
+| azure-sqlserver / public | `db_ingest_azure_sqlserver_public` |
+| azure-sqlserver / png | `db_ingest_azure_sqlserver_png` |
+
+In `databricks-3-setup-uc-lakeflow.sh`:
+```bash
+_DB_KEY_SAFE="${DB_SECRET_KEY//-/_}"
+export UC_SCHEMA="db_ingest_${_DB_KEY_SAFE}_${ROUTING}"
+```
+
 ## Naming conventions
 
 | Object | Pattern | Example |
@@ -204,5 +231,6 @@ Canonical fields stored in the Databricks secret scope (JSON, base64-encoded):
 | UC connection (public) | `{user_prefix}-{cloud}-{engine}-public` | `robert-lee-azure-mysql-public` |
 | VM-hosted connection | `{user_prefix}-vm-{engine}` | `robert-lee-vm-mysql` |
 | Secret scope key | `{cloud}-{engine}` or `vm-{engine}` | `azure-mysql`, `vm-postgres` |
+| Pipeline UC schema | `db_ingest_{db_key}_{routing}` | `db_ingest_azure_mysql_public` |
 
 Underscores in database names avoid quoting requirements in all three SQL dialects (MySQL backticks, PostgreSQL double-quotes, SQL Server square brackets).

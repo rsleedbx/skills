@@ -6,7 +6,7 @@ description: >-
   SQL expressions for MySQL, PostgreSQL, SQL Server, and Oracle across all supported data types.
   MySQL bootstrap via fkr__seed table (no generate_series). Contiguous range invariant: rows are
   always maintained as a gap-free range [min, max]; deletes only from min or max end; COUNT(*) is
-  expensive — always use MAX(pk) - MIN(pk) + 1 on indexed columns instead. How to add new type
+  expensive — use MAX on an indexed column instead (MAX(pk) for PostgreSQL/SQL Server no-restart; MAX(fkr__unq) for MySQL and SQL Server with restarts; fkr__unq not present on PostgreSQL). How to add new type
   mappings to cast_x_to_int.py / cast_int_to_x.py / convert_int_to_x.py. Gap analysis for
   JavaSqlTypes not yet covered. Use when writing or extending synthetic data generation,
   configuring fkr__seed, verifying row counts, deleting data, or debugging type mismatches.
@@ -95,13 +95,49 @@ For detail on building fkr__seed (bootstrap + doubling pattern), batch loop patt
 
 - **Inserts** extend the high end; **deletes** shrink from the low or high end only
 - Never delete from the middle — breaks `MAX - MIN + 1` count invariant
-- For AUTO_INCREMENT PKs: use `fkr__unq` seed column for counting (not `pk`) — MySQL InnoDB allocates AUTO_INCREMENT in bulk, producing gaps
+
+### Instant row count — use the indexed column, not COUNT(*)
+
+`COUNT(*)` requires a full table scan on all engines. Use `MAX(indexed_col)` instead — a B-tree index answers it in O(log N) by reading only the rightmost leaf.
+
+**Empirically verified** (Azure, 2026-04-30, MySQL 8.0.44, PostgreSQL 16.13, SQL Server 2022):
+
+| Engine | `MAX(pk)` reliable? | `MAX(fkr__unq)` reliable? | `fkr__unq` column exists? | `fkr__unq` has index? |
+|--------|--------------------|--------------------------|--------------------------|-----------------------|
+| MySQL | ✗ Always gaps | ✓ Single clean-pass loads only | ✓ Yes | ✓ UNIQUE index |
+| PostgreSQL | ✓ Clean loads | N/A | ✗ **Not created** | N/A |
+| SQL Server | ✓ No restarts | ✓ Single clean-pass loads | ✓ Yes | ✓ Filtered UNIQUE `WHERE IS NOT NULL` |
 
 ```sql
--- Correct range count for seed column
-SELECT MAX(fkr__unq) - MIN(fkr__unq) + 1 AS estimated_count
-FROM target WHERE fkr__unq IS NOT NULL;
+-- MySQL — O(log N) via UNIQUE index on fkr__unq
+-- pk is ALWAYS unreliable: innodb_autoinc_lock_mode=2 pre-allocates chunks
+-- Observed: 703,832 gaps for 1M rows (41% overhead) ✓ tested MySQL 8.0.44
+SELECT MAX(fkr__unq) - MIN(fkr__unq) + 1 AS row_count
+FROM intpk_1b WHERE fkr__unq IS NOT NULL;
+
+-- PostgreSQL — O(log N) via PRIMARY KEY B-tree
+-- fkr__unq column does not exist in PostgreSQL intpk tables (generate_series gives gap-free pk)
+-- SERIAL default cache=1; MAX(pk) = COUNT(*) for clean single-load, no restarts
+-- Observed: MAX(pk) = 1,000,038,204 returned in < 1 s on 49 GB table ✓ tested PostgreSQL 16.13
+SELECT MAX(pk) AS row_count FROM intpk_1b;
+
+-- SQL Server — O(log N) via filtered UNIQUE index on fkr__unq
+-- For tables loaded without server restart: MAX(pk) also works (IDENTITY cache=1000)
+-- Observed: pk_gap=0 and fkr_count=1,000,000 match exactly for 1M rows ✓ tested SQL Server 2022
+SELECT MAX(fkr__unq) + 1 AS row_count FROM intpk_1b;  -- fkr__unq starts at 0
 ```
+
+**Why MySQL `pk` always has gaps (mode=2):**
+`innodb_autoinc_lock_mode=2` (default since MySQL 8.0 with ROW binlog) does not lock the table during bulk inserts. It pre-allocates a chunk of IDs based on the optimizer's row estimate. Any mismatch between estimate and actual leaves wasted IDs. Even without concurrent inserts, the allocation chunk size may exceed the actual batch size. Confirmed: 703,832 extra pk values allocated for a 1M-row table.
+
+**Why `MAX(fkr__unq)` is unreliable for multi-pass MySQL tables:**
+`fkr__unq` is only contiguous if all rows were loaded in a single clean pass from `fkr__seed`. If the table received test inserts, retries, or data from multiple independent sessions, the range has holes. Confirmed: `intpk` base table shows `MAX(fkr__unq)=9,000,000` with only 1M rows (range jumped across batch boundaries).
+
+**Why PostgreSQL has no `fkr__unq`:**
+PostgreSQL uses `generate_series()` as the row source, which provides perfectly sequential integers directly into `pk` via the SERIAL sequence. No `fkr__seed` table is needed, so `fkr__unq` was never added. SERIAL sequences use cache=1 by default, causing no pre-allocation gaps.
+
+**SQL Server IDENTITY restart caveat:**
+SQL Server caches 1000 IDENTITY values in memory. A server restart during data loading wastes the cached values, causing a +1000 jump in the next assigned pk. For tables loaded without restart (1M, 10M), `MAX(pk)` = `COUNT(*)`. For tables loaded across restarts (100M, 1B), prefer `MAX(fkr__unq)` via the filtered unique index.
 
 For full seed column DDL, NULL behavior in UNIQUE indexes, and delete direction rules: see [seed-column-and-range.md](seed-column-and-range.md).
 
