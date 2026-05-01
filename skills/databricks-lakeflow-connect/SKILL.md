@@ -194,6 +194,31 @@ Canonical fields stored in the Databricks secret scope (JSON, base64-encoded):
 | `access_type` | `vm` / `flexible` / `azure_sql` | Where the DB is hosted |
 | `vm_fqdn_public` | `robert-lee-mysql-vm.eastus2.cloudapp.azure.com` | VM only: public FQDN for local CLI |
 
+## Benchmark execution — monitor first run before backgrounding
+
+**General rule**: always monitor the first pipeline update to COMPLETED before backgrounding. See `developing-a-plan` skill — "Monitor first run before waiting" section.
+
+**What to verify in the LFC pipeline first run output:**
+1. Correct `uc_schema` (e.g. `db_ingest_vm_sqlserver_public`), correct `connection`, correct `source_schema`/`source_catalog`
+2. Valid `update_id` returned by `start-update`
+3. Polling reaches `RUNNING` (not stuck on `WAITING_FOR_RESOURCES`)
+4. Pipeline reaches `COMPLETED` — not `FAILED`
+5. Sheet write succeeds — `updated: Sheet1!E<n>:G<n>` at the correct row number
+
+**Common LFC first-run failures:**
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Failed to resolve flow` | Wrong connection, tables missing on that server, or SSL error | Check connection host, DB key, source_catalog |
+| `SSL certificate validation failed` | Connection uses raw IP, cert expects hostname | Update connection host to FQDN, add `trustServerCertificate=true` |
+| `PIPELINE_ID: source databricks-3-setup-uc-lakeflow.sh first` | Pipeline creation silently failed (403, empty PIPELINE_ID) | Check DATABRICKS_TOKEN validity, verify connection exists |
+| `time data '' does not match format` | Pipeline FAILED but `kill -INT $$` didn't abort sourced script | Check pipeline UI for root cause; fix error handling |
+| `Writing to row 26` (out of range) | Sheet matcher found no matching DB/routing/mode/rows combo | Verify sheet columns A–D exactly match what the script exports |
+
+**Also: never benchmark while a bulk load is running on the same server** — see `synthetic-data-in-database` skill.
+
+---
+
 ## One pipeline per UC schema (streaming table ownership)
 
 **Constraint**: a Databricks streaming table can only be owned and written by **one pipeline**. If two pipelines target the same UC schema, they will conflict on any table with the same name.
