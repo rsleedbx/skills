@@ -338,6 +338,84 @@ SELECT usename, client_addr FROM pg_stat_activity WHERE usename LIKE 'lfc%';
 | Cross-workspace | One scope per workspace; use `WorkspaceClient(profile="…")` to target each workspace |
 | SP OAuth secret limit | 5 per SP — see `databricks-service-principal` skill for mint/validate pattern |
 
+## Local flat storage model (bash setup scripts)
+
+Secrets are stored locally in a flat directory before being pushed to Databricks:
+
+```
+~/.databricks/secrets/<scope>/
+  <key>.json        ← full secret JSON (includes .lineage block)
+  <key>.meta.json   ← metadata (SHA256, push timestamps)
+```
+
+No UUIDs, no `_index.json`, no two-tier structure. All three management scripts (`secrets-pull.sh`, `secrets-push.sh`, `secrets-status.sh`) operate on this flat layout, globbing `*.json` files to discover keys.
+
+## save_db_secret — idempotency pattern
+
+`save_db_secret` skips both the local file write and the Databricks `put-secret` push when the secret content is unchanged. Comparison excludes `.lineage` so lineage-only updates don't trigger spurious writes:
+
+```bash
+_existing=$(local_secrets_read "${secret_key}" 2>/dev/null || true)
+if [[ -n "${_existing}" ]]; then
+  _existing_clean=$(echo "${_existing}" | jq -cS 'del(.lineage)')
+  _new_clean=$(echo "${new_json}"       | jq -cS 'del(.lineage)')
+  if [[ "${_existing_clean}" == "${_new_clean}" ]]; then
+    echo "==> [secrets] '${secret_key}' unchanged — skipping write and push"
+    return 0
+  fi
+fi
+```
+
+`jq -cS` (compact + sorted keys) ensures field-order differences don't produce false positives.
+
+## _ADMIN_CREDS_CHANGED — avoid double writes
+
+Database setup scripts call `save_db_secret` twice: once for admin credentials (early, after server create/reset), and once for LFC user credentials (late, after configure). The second save should detect no change and skip on stable re-runs. Make this work by:
+
+1. Setting `_ADMIN_CREDS_CHANGED=1` only when admin credentials are actually new or reset
+2. Guarding the first save with `if [[ -n "${_ADMIN_CREDS_CHANGED:-}" ]]`
+
+```bash
+# Section 1: server create → set flag
+if az mysql flexible-server create ...; then
+  _ADMIN_CREDS_CHANGED=1
+fi
+
+# Section 2b: password reset → set flag
+if <password mismatch>; then
+  az mysql flexible-server update --admin-password "$NEW_PASS" ...
+  _ADMIN_CREDS_CHANGED=1
+fi
+
+# Section 3: save admin creds — only when changed
+if [[ -n "${_ADMIN_CREDS_CHANGED:-}" ]]; then
+  host_fqdn="$SERVER_FQDN"
+  # ... set all fields ...
+  save_db_secret "${SERVER_NAME}"
+fi
+
+# Section 3b: save LFC user creds — save_db_secret's idempotency check
+# handles the skip on stable re-runs automatically
+save_db_secret "${SERVER_NAME}"
+```
+
+## load_db_secret — if-form with server_name update
+
+Use the `if`-form (not `|| true`) when you also want to update the server name variable from the stored value. This handles migration from legacy logical-alias keys to server-name keys:
+
+```bash
+if load_db_secret "${SERVER_NAME}"; then
+  if [[ -n "${server_name:-}" ]]; then
+    export SERVER_NAME="${server_name}"
+    export PE_NAME="${SERVER_NAME}-pe"
+  fi
+fi
+# Capture loaded credentials before they are overwritten later
+_LOADED_PASSWORD="${dba__password:-${password:-}}"
+```
+
+Use `load_db_secret "${VM_NAME}" || true` for VM scripts — VM names are stable and don't need the migration pattern.
+
 ## Real examples in this repo
 
 | File | What it shows |
