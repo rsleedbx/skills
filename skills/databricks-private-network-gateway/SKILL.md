@@ -112,9 +112,33 @@ Key fields:
 | Field | Value | Notes |
 |-------|-------|-------|
 | `traffic_mode` | `SPECIFIC_DESTINATIONS` | only route listed hostnames through PNG |
-| `azure_cloud_connection.gateway_subnet.resource_id` | customer subnet resource ID | the VNet subnet PNG injects into |
+| `azure_cloud_connection.gateway_subnet.resource_id` | customer subnet resource ID | the VNet subnet PNG injects into — **must be delegated to `Microsoft.Databricks/workspaces`** |
 | `private_dns_resolvers` | `168.63.129.16` | Azure's magic IP — resolves private DNS zones within the VNet |
 | `destinations` | array of `{destination_type, value}` | DNS_NAME entries; see destination rules above |
+
+## Subnet delegation requirement
+
+The `gateway_subnet` must be delegated to `Microsoft.Databricks/workspaces` before PNG can inject into it.
+Without delegation, Azure Resource Manager blocks the injection and PNG stays in `CREATING` indefinitely.
+
+```bash
+az network vnet subnet update \
+  --resource-group "$RESOURCE_GROUP" \
+  --vnet-name "$VNET_NAME" \
+  --name "$SUBNET_NAME" \
+  --delegations Microsoft.Databricks/workspaces
+```
+
+**Constraint**: delegated subnets cannot host private endpoints. Keep the PNG gateway subnet separate from the subnets used for database private endpoints (MySQL PE, Postgres PE, etc.). Those PE subnets must NOT be delegated.
+
+The workspace's Azure subscription must be in the **same Azure AD tenant** as the subnet's subscription. Tenant mismatch = PNG cannot inject. Verify:
+```bash
+# Workspace tenant:
+curl -s https://adb-<WORKSPACE_ID>.<N>.azuredatabricks.net/aad/auth 2>&1 | grep -i "location:" | grep -oP 'microsoftonline.com/\K[^/]+'
+# Subscription tenant:
+az account show --subscription <SUB_ID> --query tenantId -o tsv
+# Both must match.
+```
 
 ## API: update PNG destinations (PATCH)
 
