@@ -268,6 +268,62 @@ Use `UPPER_SNAKE_CASE` keys so fields are grep-able across notebooks.
 | Service principal (Databricks) | `CLIENT_ID`, `CLIENT_SECRET`, `SP_ID`, `APP_ID` |
 | Any | `LAST_ROTATED_AT` (ISO-8601) — track when credentials were last changed |
 
+### Database secret v2 schema (`save_db_secret`)
+
+The v2 database secret format used by `databricks-secrets-helper.sh`:
+
+```json
+{
+  "version": "v2",
+  "host_fqdn": "<FQDN>",
+  "port": 1433,
+  "catalog": "<default catalog/db>",
+  "user": "<default user>",
+  "password": "<default password>",
+  "db_type": "sqlserver|mysql|postgres",
+  "schema": "<default schema>",
+  "replication_mode": "ct|cdc|...",
+  "access_type": "azure-managed|azure-vm|...",
+  "cloud": {"provider": "azure", "location": "eastus2"},
+  "dba": {"user": "<dba user>", "password": "<dba password>", "catalog": "<dba catalog>"},
+  "routing": {
+    "public": {"user": "lfc_user_public", "password": "<password>"},
+    "png":    {"user": "lfc_user_png",    "password": "<password>"}
+  },
+  "users": {
+    "<default user>":  {"password": "<password>", "catalog": "<catalog>", "schema": "<schema>", "replication_mode": "<mode>"},
+    "lfc_user_public": {"password": "<password>", "catalog": "<catalog>", "schema": "<schema>", "replication_mode": "<mode>"},
+    "lfc_user_png":    {"password": "<password>", "catalog": "<catalog>", "schema": "<schema>", "replication_mode": "<mode>"}
+  }
+}
+```
+
+**`routing` block** — present when routing-specific users are configured. Keyed by routing type (`public`, `png`). After `load_db_secret`, fields come back as `routing__public__user`, `routing__public__password`, etc.
+
+**`users` dict** — present alongside `routing`. Keyed by username. Each entry carries `password`, `catalog`, `schema`, `replication_mode` so UC connection builders can look up per-user credentials by name without knowing the routing type. After `load_db_secret`, flattened as `users__<username>__<field>` (e.g. `users__lfc_user_public__password`). Note: usernames with single underscores are unambiguous because the separator is double-underscore (`__`).
+
+**Pre-seeding on re-runs** — prevents password rotation when the setup script re-runs:
+```bash
+# legacy flat format
+[[ -n "${routing__public__password:-}" ]] && LFC_USER_PUBLIC_PASSWORD="${routing__public__password}"
+[[ -n "${routing__png__password:-}" ]]    && LFC_USER_PNG_PASSWORD="${routing__png__password}"
+# users dict format (preferred)
+[[ -z "${LFC_USER_PUBLIC_PASSWORD:-}" && -n "${users__lfc_user_public__password:-}" ]] \
+  && LFC_USER_PUBLIC_PASSWORD="${users__lfc_user_public__password}"
+[[ -z "${LFC_USER_PNG_PASSWORD:-}" && -n "${users__lfc_user_png__password:-}" ]] \
+  && LFC_USER_PNG_PASSWORD="${users__lfc_user_png__password}"
+```
+
+**Verifying routing** — because each routing path uses a different DB login (`lfc_user_public` vs `lfc_user_png`), you can confirm which network path Databricks serverless actually took by querying the database for active sessions:
+```sql
+-- SQL Server
+SELECT login_name, client_net_address FROM sys.dm_exec_sessions WHERE login_name LIKE 'lfc%';
+-- MySQL
+SELECT user, host FROM information_schema.processlist WHERE user LIKE 'lfc%';
+-- PostgreSQL
+SELECT usename, client_addr FROM pg_stat_activity WHERE usename LIKE 'lfc%';
+```
+
 ---
 
 ## Key facts

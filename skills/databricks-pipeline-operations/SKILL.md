@@ -26,14 +26,43 @@ All commands use `databricks -p <PROFILE>`.
 | view | `databricks pipelines get --pipeline-id <id>` |
 | list all | `databricks pipelines list-pipelines` |
 | create | `databricks pipelines create --json @spec.json` |
-| update/modify | `databricks pipelines update --pipeline-id <id> --json @patch.json` |
-| run (triggered) | `databricks pipelines start-update --pipeline-id <id>` |
-| full refresh | `databricks pipelines start-update --pipeline-id <id> --full-refresh-selection <table>` |
+| update/modify | `databricks api put /api/2.0/pipelines/<id> --json @full_spec.json` (PUT replaces full spec; PATCH not supported) |
+| run (triggered) | `databricks pipelines start-update <id>` |
+| full refresh one table | `databricks pipelines start-update <id> --json '{"full_refresh_selection": ["catalog.schema.table"]}'` |
+| full refresh pipeline | `databricks pipelines start-update <id> --full-refresh` |
 | stop | `databricks pipelines stop --pipeline-id <id>` |
-| pause (continuous only) | PATCH `{"continuous": false}` via `databricks api patch /api/2.0/pipelines/<id>` |
+| pause (continuous only) | `databricks api put /api/2.0/pipelines/<id> --json '{"continuous": false}'` |
 | tail live events | `databricks pipelines logs --pipeline-id <id>` |
 | list all updates | `databricks api get "/api/2.0/pipelines/<id>/updates?max_results=20"` |
 | delete | `databricks pipelines delete --pipeline-id <id>` |
+
+### `full_refresh_selection` requires FULLY QUALIFIED destination table name
+
+**Wrong** — causes INITIALIZING → FAILED (API ignores unrecognised table):
+```bash
+--json '{"full_refresh_selection": ["intpk_10m"]}'
+```
+
+**Correct** — resets streaming checkpoint, forces full re-scan:
+```bash
+--json '{"full_refresh_selection": ["robert-lee.db_ingest_azure_postgres_public.intpk_10m"]}'
+# format: catalog.schema.table_name (destination UC table, not source table name)
+```
+
+**Why unqualified names fail silently**: the API accepts the request (returns 200 + update_id) but finds no matching destination table → INITIALIZING → FAILED with no error details in events.
+
+**For benchmarking**: always use `full_refresh_selection` with the fully qualified destination name. The streaming checkpoint lives in the destination Delta table — not in the pipeline objects[] — so removing/re-adding the table from objects[] does NOT reset the cursor. Only `full_refresh_selection` (or DROP TABLE) resets it.
+
+### `databricks api put` for pipeline spec updates (PATCH not supported)
+
+```bash
+# Get full spec, modify objects[], PUT back
+_SPEC=$(databricks api get /api/2.0/pipelines/<id> --profile $PROFILE | jq '.spec')
+_MODIFIED=$(echo "$_SPEC" | jq '.ingestion_definition.objects = [...]')
+databricks api put /api/2.0/pipelines/<id> --profile $PROFILE --json "$_MODIFIED"
+```
+
+The `databricks api patch` verb is not registered for the pipelines endpoint — use `put` with the full `.spec` (including `id`, `catalog`, `channel`, `name`, `pipeline_type`, `serverless`, `target`).
 
 **Pause for triggered pipelines**: there is no pause — simply don't trigger a new run. For continuous mode, flip `continuous: false` or stop the in-flight update.
 
@@ -43,19 +72,43 @@ All commands use `databricks -p <PROFILE>`.
 
 ### Primary signal: is work being done?
 
+**CRITICAL: `filter=update_id='...'` in the events API is broken** — `update_id` is always `null` in event response objects. The filter is silently ignored and returns all events for the pipeline. Always filter by **timestamp window** instead (see below).
+
 ```bash
-# rows ingested per micro-batch for a specific update
+# Correct: fetch all events, filter by RUNNING→COMPLETED timestamp window
+T_START="<timestamp of RUNNING state>"   # captured from update_progress polling
+T_END="<timestamp of COMPLETED state>"
 databricks -p $PROFILE api get \
-  "/api/2.0/pipelines/<pipeline_id>/events?filter=update_id%3D'<uid>'&max_results=200" \
-  | jq '[.events[]
+  "/api/2.0/pipelines/<pipeline_id>/events?max_results=200" \
+  | jq --arg s "$T_START" --arg e "$T_END" '
+  [.events[]
     | select(.event_type=="flow_progress"
+         and .timestamp >= $s and .timestamp <= $e
+         and (.details.flow_progress.metrics.num_upserted_rows // 0) > 0)
+    | .details.flow_progress.metrics.num_upserted_rows
+  ] | if length == 0 then empty else add end'
+```
+
+**Do NOT sum without the timestamp window** — each pipeline accumulates `flow_progress` events from all historical runs. Summing all `num_upserted_rows > 0` events without a window produces wildly inflated numbers (e.g. reporting 341M rows when the actual run processed 100K).
+
+Per-table breakdown within an update:
+```bash
+  | jq --arg s "$T_START" --arg e "$T_END" '[.events[]
+    | select(.event_type=="flow_progress"
+         and .timestamp >= $s and .timestamp <= $e
          and (.details.flow_progress.metrics.num_upserted_rows // 0) > 0)
     | { table: (.message | split("'"'"'")[1] | split(".")[-1]),
         rows:  .details.flow_progress.metrics.num_upserted_rows,
         ts:    .timestamp }]'
 ```
 
-**A COMPLETED run with 0 rows is not an error** — QBC cursor found no rows with `dt > watermark`. Expected when no source writes occurred between runs.
+**What `num_upserted_rows` measures**: emitted by the internal `_upsert` flow. It counts rows processed from the source through the CT/QBC pipeline — the source-side scan count. For a `full_refresh_selection` re-run where the Delta target already contains those rows, `num_upserted_rows` still equals the source row count (all rows re-processed) even though the net-new Delta output records = 0. The UI "Output records" shows net-new Delta appends (0 on re-runs); `num_upserted_rows` shows source processing volume. For benchmarking transfer performance, `num_upserted_rows` is the correct metric.
+
+**A COMPLETED run with `num_upserted_rows` = 0 or missing** is valid for QBC incremental runs where no new source rows existed since the last watermark. For benchmark snapshot runs (`full_refresh_selection`), always expect `num_upserted_rows` ≈ source table row count.
+
+**Fast single-batch runs may not emit `num_upserted_rows`** — for some tables that complete in one micro-batch, the flow_progress RUNNING event has `"metrics": {}` and the COMPLETED event has no metrics key at all. The jq sum returns `empty` for these runs. Whether or not the metric is emitted depends on the DB engine, table size, and LFC version — do not rely on its absence as proof of 0 rows.
+
+`full_refresh_selection` internals: emits a `rewind_summary` event with `backing_table_restore` (restores the QBC streaming checkpoint / watermark backing table to an earlier version, forcing re-scan from epoch) and a `dataset_life_cycle: RESET` event. These are expected and correct for every `full_refresh_selection` triggered benchmark run.
 
 ### Update state summary
 

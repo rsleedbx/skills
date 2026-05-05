@@ -194,16 +194,35 @@ Canonical fields stored in the Databricks secret scope (JSON, base64-encoded):
 | `access_type` | `vm` / `flexible` / `azure_sql` | Where the DB is hosted |
 | `vm_fqdn_public` | `robert-lee-mysql-vm.eastus2.cloudapp.azure.com` | VM only: public FQDN for local CLI |
 
-## Benchmark execution — monitor first run before backgrounding
+## Benchmark execution — canary principle (parallel + fail-fast + validate script)
 
-**General rule**: always monitor the first pipeline update to COMPLETED before backgrounding. See `developing-a-plan` skill — "Monitor first run before waiting" section.
+**The canary run validates the script chain, not the timing.** Run a 100K canary for every new pipeline simultaneously to discover all failures at once before investing time in larger tables.
+
+**Three rules, one principle:**
+1. **Parallel** — launch all pipeline canaries at the same time; don't wait for DB A before starting DB B
+2. **Fail-fast** — use intpk_100k (100K rows, ingests in seconds); same failures appear at 100K and 1B
+3. **Script validation** — the canary proves the entire chain works (connection → pipeline → actual_rows > 0 → sheet write); only after canary passes does timing from larger tables mean anything
+
+**Canary pass criteria** (all must be true before scaling up):
+1. Pipeline reaches `COMPLETED`
+2. `actual_rows = 100000` in the destination Delta table
+3. Sheet row written (`updated: Sheet1!E<n>:H<n>`)
+
+**If canary fails** → stop that DB's sequence, fix the issue, re-run canary. Do not run 1M until 100K passes.
+
+**After canary passes** → launch the full sequence (1M → 10M → 100M → 1B) for that DB in background; canaries for other DBs run concurrently.
+
+See `developing-a-plan` skill — "Canary principle" section for the full parallel launch pattern.
+
+**Monitor first run before backgrounding**: always monitor the first pipeline update to COMPLETED before backgrounding. See `developing-a-plan` skill — "Monitor first run before waiting" section.
 
 **What to verify in the LFC pipeline first run output:**
 1. Correct `uc_schema` (e.g. `db_ingest_vm_sqlserver_public`), correct `connection`, correct `source_schema`/`source_catalog`
 2. Valid `update_id` returned by `start-update`
 3. Polling reaches `RUNNING` (not stuck on `WAITING_FOR_RESOURCES`)
 4. Pipeline reaches `COMPLETED` — not `FAILED`
-5. Sheet write succeeds — `updated: Sheet1!E<n>:G<n>` at the correct row number
+5. `actual_rows > 0` — a COMPLETED pipeline with 0 actual rows means empty source or broken connection
+6. Sheet write succeeds — `updated: Sheet1!E<n>:H<n>` at the correct row number
 
 **Common LFC first-run failures:**
 

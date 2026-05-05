@@ -91,6 +91,51 @@ For detail on building fkr__seed (bootstrap + doubling pattern), batch loop patt
 
 ---
 
+## Progressive loading — 100K first, then scale up
+
+**Rule: when setting up a new database for the first time, always load `intpk_100k` (100,000 rows) first before loading larger tables.**
+
+This is the "fail fast" loading pattern:
+1. Load 100K rows — fast (~seconds), proves the schema, stored procedure, and `fkr__seed` are all working
+2. Run the 100K benchmark immediately — proves LFC can connect and ingest
+3. Only if 100K succeeds: start background loads for 1M → 10M → 100M → 1B
+
+**Why 100K first:**
+- If the stored procedure has a bug, you find it in seconds, not after a 2-hour 1B-row load
+- If the LFC connection is wrong, the 100K pipeline run fails fast before you invest in larger tables
+- 100K rows is small enough to rebuild quickly if something goes wrong
+
+**Table naming convention:**
+
+| Table name | Intended row count |
+|------------|-------------------|
+| `intpk_100k` | 100,000 |
+| `intpk_1m` | 1,000,000 |
+| `intpk_10m` | 10,000,000 |
+| `intpk_100m` | 100,000,000 |
+| `intpk_1b` | 1,000,000,000 |
+
+Note: `intpk` (no suffix) is the original test table (small, used for schema validation). It is not a benchmark table.
+
+**Load sequence for a fresh database:**
+```bash
+# 1. Load 100K — fast, validate immediately
+CALL fill_intpk('intpk_100k', 100000, 10000);     # MySQL
+# or PostgreSQL: SELECT fill_intpk('intpk_100k', 100000);
+# or SQL Server: EXEC fill_intpk 'intpk_100k', 100000;
+
+# 2. Verify 100K loaded (end-state check)
+SELECT MAX(pk) FROM intpk_100k;  -- expected: 100000
+
+# 3. Run LFC benchmark for 100K — validate pipeline works
+# If pipeline fails or actual_rows=0, fix before loading larger tables
+
+# 4. Only after 100K benchmark succeeds: load remaining sizes in background
+# CALL fill_intpk('intpk_1m', 1000000, ...) — can be backgrounded
+```
+
+---
+
 ## Testing isolation — do not load and benchmark simultaneously
 
 **Rule: complete all bulk data loads before running any read-performance benchmark.**

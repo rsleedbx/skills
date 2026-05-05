@@ -97,6 +97,34 @@ Beyond the implementation-agnostic rule above, watch for these common mistakes:
 
 **Duplicate coverage** — two skills covering the same subject from slightly different angles (e.g., `databricks-connect` and `python-databricks-connect`) should be merged unless they truly serve different triggering conditions. Check by asking: "would I read both before starting a task?" If yes, merge them.
 
+## Commit before destructive operations
+
+Before deleting files, renaming files, or doing large refactors — commit any unrelated pending changes first. This keeps the deletion commit isolated, makes the intent clear in `git log`, and lets deleted files be recovered with `git show <commit>:<path>`.
+
+**Order of operations for file deletion:**
+
+```bash
+# 1. Commit pending work (unrelated to the deletion)
+git add <modified-files>
+git commit -m "refactor: ..."
+
+# 2. Delete with git rm (stages the removal)
+git rm scripts/old-script-1.sh scripts/old-script-2.sh
+
+# 3. Commit the deletion separately — message lists what was removed and why
+git commit -m "chore: delete N obsolete scripts — replaced by generic-script.sh"
+```
+
+**Why separate commits matter:**
+- `git log --diff-filter=D --name-only` instantly shows every deleted file and when
+- `git show <deletion-commit>:<path>` recovers a single file without a full revert
+- Reviewers can confirm deletions are complete replacements, not accidental drops
+
+**When to apply this rule:**
+- Before `git rm` of any script, config, or doc that is being superseded
+- Before renaming a file (same principle — commit first, then `git mv`)
+- Before a large refactor that removes or restructures multiple files
+
 ## Commit before each skill change
 
 Before editing any skill file, check for unstaged changes and commit them first. This keeps skill edits in their own commits, making it easy to revert or review individual changes.
@@ -117,6 +145,36 @@ git -C ~/.cursor commit -m "skill: <describe what changed>"
 - Before updating a description
 
 **One logical change per commit** — do not bundle a description fix with a content split in the same commit. If multiple skills need changes, commit each one separately so each commit is independently revertable.
+
+## Anti-pattern checklist — run before publishing any new script or skill
+
+When writing a new shell script or SKILL.md, check it against every known anti-pattern before saving. Anti-patterns accumulate across skills — this checklist is the single place to check all of them.
+
+### Shell scripts
+
+| Anti-pattern | What to check | Correct alternative | Source skill |
+|---|---|---|---|
+| `export DATABRICKS_TOKEN` | Does the script set `DATABRICKS_TOKEN` via `databricks auth token \| jq`? | Remove it — use `--profile` on every `databricks` call | `databricks-cli-api` |
+| `curl` for Databricks API | Does the script use `curl -H "Authorization: Bearer $TOKEN"` to call Databricks APIs? | Replace with `databricks api get/post/put` | `databricks-cli-api` |
+| `2>/dev/null` on data commands | Does the script suppress stderr on any command whose output is used? | Use `CMD` wrapper which captures stderr; never suppress it | `shell-cmd-wrapper` |
+| `$()` piped to CLI | Does the script use `$(databricks api ...)` and pipe the output? | Capture to `/tmp/<binary>_stdout.$$` via CMD, then use `jq` on the file | `shell-cmd-wrapper` |
+| `nohup ... &` inside a script body | Does the script background a subprocess with `nohup` and then try to read its output? | Use `block_until_ms: 0` on the Shell tool and `Await` to monitor | `shell-script-practices` |
+| `databricks api patch` for pipelines | Does the script use `PATCH` to update a Databricks pipeline? | Use `databricks api put` with the full `.spec` body | `databricks-pipeline-operations` |
+| `full_refresh_selection` with unqualified name | Does the script pass just `table_name` (not `catalog.schema.table`)? | Always pass the fully qualified destination table name | `databricks-pipeline-operations` |
+| One-off script per variant | Does the script duplicate logic from an existing script with minor parameter changes? | Add an argument to the existing generic script instead | `developing-a-plan` |
+
+### Skill files
+
+| Anti-pattern | What to check | Correct alternative |
+|---|---|---|
+| Product-specific content in a generic skill | Is Databricks/cloud-specific code in `developing-a-plan` or `shell-script-practices`? | Move to the product skill; keep generic skills product-agnostic |
+| Specific project names in description | Does the description say "for LakeFlow Connect testing" or "for PNG demo"? | Replace with the general capability it provides |
+| Duplicates content from another skill | Does this skill re-explain something already in a product/engine skill? | Cross-reference with "See `<skill>`" instead of duplicating |
+
+**Apply this checklist whenever:**
+- A new `.sh` script is created
+- A new `SKILL.md` is created or significantly edited
+- Code is copied from one script to another
 
 ## Periodic audit checklist
 

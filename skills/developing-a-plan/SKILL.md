@@ -238,6 +238,342 @@ mysql -u dba_user -p"$PW" -e "SELECT MAX(pk) FROM intpk_1m;" robert_lee_png_db
 # If 0 or NULL → rows were not written → stop and diagnose before continuing
 ```
 
+## Canary principle — parallel, fail-fast, validate the script first
+
+These three ideas are one unified rule, not three separate ones:
+
+**The canary run's purpose is to validate the script chain so that subsequent runs are reliable — not to measure timing.**
+
+A 100K canary run that succeeds proves:
+1. The source DB has the data and the LFC user can read it
+2. The pipeline was created correctly (right connection, schema, table name)
+3. The pipeline reached COMPLETED (not stuck or FAILED)
+4. The actual rows in the Delta table match what the source had
+5. The sheet write found the correct row and wrote the result
+6. The script can be re-run reliably for larger tables
+
+Once the canary passes, every larger run (1M, 10M, 100M, 1B) is just the same chain with more data. Timing from larger runs is the real benchmark — the 100K timing is irrelevant.
+
+**If the canary fails, stop that DB's sequence.** Fix the failure before running 1M. The same failure will repeat at every size.
+
+### Step 1 — Launch all canaries in parallel immediately
+
+Do not wait for DB A to finish before starting DB B. Launch one canary per pipeline simultaneously the moment infrastructure is ready:
+
+```bash
+# Write each canary to its own script file (do NOT use nohup bash -c '...' with single
+# quotes for multi-line scripts — nested quotes break bash parsing)
+for spec in azure-mysql:png azure-postgres:public azure-postgres:png \
+            azure-sqlserver:public azure-sqlserver:png \
+            vm-mysql:public vm-mysql:png \
+            vm-postgres:public vm-postgres:png \
+            vm-sqlserver:public vm-sqlserver:png; do
+  db="${spec%%:*}"; routing="${spec##*:}"
+  cat > "/tmp/canary-${db}-${routing}.sh" << SCRIPT
+#!/usr/bin/env bash
+set -uo pipefail
+cd /path/to/scripts
+export WORKSPACE_PROFILE=... PNG_SECRET_SCOPE=... DATABRICKS_TOKEN=...
+export SOURCE_TABLE=intpk_100k
+source ./databricks-3-setup-uc-lakeflow.sh ${db} ${routing} qbc
+source ./databricks-4-bench-run.sh 100000 "\$SS_ID"
+SCRIPT
+  nohup bash "/tmp/canary-${db}-${routing}.sh" > "/tmp/canary-${db}-${routing}.log" 2>&1 &
+  echo "$db $routing PID=$!"
+done
+```
+
+**Correct parallel layout:**
+```
+DB A (postgres public):   100K ─── 1M ─── 10M ─── 100M ─── 1B
+DB B (sqlserver public):  100K ─── 1M ─── 10M ─── 100M ─── 1B
+DB C (sqlserver png):     100K ─── 1M ─── 10M ─── 100M
+DB D (mysql public):      (blocked: active update) ─── 100K ─── ...
+DB E (vm-mysql public):   100K ─── ...
+...all 12 at once
+```
+
+### Step 2 — Check all canary logs simultaneously
+
+```bash
+for log in /tmp/canary-*.log /tmp/bench-*.log; do
+  label=$(basename "$log" .log)
+  last=$(grep -E "COMPLETED|FAILED|ERROR|actual rows:|updated:|WARNING" "$log" 2>/dev/null | tail -1)
+  printf "%-40s  %s\n" "$label" "${last:-<running...>}"
+done
+```
+
+### Step 3 — Stop any DB whose canary failed; scale up the rest
+
+- **COMPLETED + actual_rows > 0 + sheet written**: canary passed → launch full benchmark script (100K → 1M → 10M → 100M → 1B)
+- **actual_rows = 0**: source empty or connection broken → fix before scaling
+- **FAILED**: connection, SSL, or table issue → fix, re-run canary, only then scale
+- **WARNING: no matching row**: sheet column A mismatch → fix sheet before continuing
+
+### Still serialize within each DB
+
+A single pipeline cannot have two active updates simultaneously. Run sizes in sequence: 100K → 1M → 10M → 100M → 1B for each DB. Parallelize across DBs, not within.
+
+## Eliminate blockers by restructuring the test, not by fixing the blocker
+
+When a pre-condition appears required but adds significant cost, ask first whether the test can be restructured to make the pre-condition unnecessary.
+
+**General principle:** Before investing effort to fix a blocker, check whether changing _how_ you run the test removes the need for that blocker entirely. This is faster and produces a cleaner test design.
+
+**Signs that restructuring is the right move:**
+- The fix is orthogonal to what you're actually measuring (e.g., adding an index to speed up polling when you're benchmarking snapshots, not polling)
+- The fix would permanently change the environment in ways that affect other tests
+- The fix takes longer to implement than redesigning the test
+
+**When a specific product blocks you:** consult the product's skill for the canonical workaround. The solution is product-specific knowledge, not plan-building knowledge. Record the lesson in that product skill, not here.
+
+## Plan directory structure
+
+Each plan lives in its own subdirectory under `docs/`. Files within the directory use short names — the directory provides the namespace.
+
+```
+docs/
+└── <plan-name>/
+    ├── plan.md           ← goal, key facts, links (≤ 30 lines)
+    ├── tracker.md        ← per-item status, active processes, resume commands
+    ├── chronology.md     ← index: one row per run with ✓/✗/⚠ and link to detail
+    ├── chronology-1.md   ← detail for run 1 (immutable once closed)
+    ├── chronology-2.md   ← detail for run 2
+    └── ...
+```
+
+### File responsibilities
+
+**`plan.md`** — static reference: goal, key facts, links to tracker and chronology, quick status block.
+
+**`tracker.md`** — current system state: per-item status tables, data load status, active PIDs, resume commands.
+
+**`chronology.md`** — append-only index: one row per run, `| [N](chronology-N.md) | date | title | ✓/✗/⚠ result |`.
+
+**`chronology-N.md`** — immutable run record: actions, results, mistakes, fix applied, next step → link to N+1.
+
+### Rules
+
+- **Never put detail in `chronology.md`** — one line per run only. Detail goes in `chronology-N.md`.
+- **Never edit a closed `chronology-N.md`** — corrections go in the next entry.
+- **New session = new chronology entry** — even if you only verified state and did nothing.
+- **When closing `chronology-N.md`, immediately: (1) create `chronology-(N+1).md` as a blank stub, (2) add run N's row to `chronology.md`.** The link `→ [N+1](chronology-N+1.md)` must point to a file that exists — never leave it dangling.
+- **`tracker.md` reflects now; `chronology-N.md` records what happened.** Don't merge them.
+
+### Blank template for a new run
+
+```markdown
+# Run N — [title]
+
+**Date**: _fill in_
+**Back to index**: [chronology.md](chronology.md)
+
+---
+
+## Actions
+_What was launched or changed this session?_
+
+## Results
+| item | outcome | artifact |
+|------|---------|----------|
+| | | |
+
+## Mistakes
+_What went wrong and why?_
+
+## Fix applied
+_What was changed in response?_
+
+## Next step decided
+_What should run N+1 do?_
+
+→ [N+1](chronology-N+1.md)
+```
+
+## Write one generic script, not many custom scripts
+
+Every time a new variant appears — a retry, a subset re-run, a canary pass — the instinct is to create a new file. This generates a proliferation of near-identical scripts:
+
+```
+bench-run-mysql.sh                 # original
+bench-run-postgres.sh              # original
+bench-run-postgres-public-rerun.sh # retry after failures
+bench-run-postgres-public-10m-to-1b.sh  # resume from 10M
+bench-run-sqlserver-1m-rerun.sh    # single row fix
+bench-run-100k-canaries.sh         # canary pass
+bench-run-vm-mysql-retry.sh        # retry variant
+bench-run-vm-postgres-retry.sh     # retry variant
+bench-run-vm-sqlserver-retry.sh    # retry variant
+bench-run-all.sh                   # orchestrator
+```
+
+Each file is a one-off. None can be reused. The next variant creates another file. **This is the wrong pattern.**
+
+### The correct pattern: one generic script with arguments
+
+Extract the invariant logic into a single parameterized script. All variants become invocations:
+
+```bash
+# One generic script: bench-run.sh <db> <routing> <table> <rows>
+bash bench-run.sh azure-postgres public intpk_1m   1000000
+bash bench-run.sh azure-postgres public intpk_10m  10000000
+bash bench-run.sh vm-sqlserver   public intpk_1m   1000000   # retry: same invocation
+bash bench-run.sh azure-mysql    public intpk_100k 100000     # canary: same script
+```
+
+**Rules:**
+- Before creating a new script file, ask: "can I call the existing script with different arguments?"
+- If the answer is yes — do that. Do not create a new file.
+- If a genuine new capability is needed (different pre/post steps), add an optional argument or flag to the existing script rather than copying it.
+- Orchestrators (run-all, parallel launchers) are legitimate — they call the generic script in parallel/sequence. They do not duplicate its logic.
+
+### Identifying the generic interface
+
+For a benchmark workflow, the generic parameters are always:
+```
+<db-key>  <routing>  <table>  <row-count>  [<spreadsheet-id>]
+```
+Everything else (connection name, pipeline name, UC catalog/schema, polling logic, sheet write) is derived from those inputs by the existing setup/bench scripts.
+
+**Before writing any new file:** map the intended action onto these parameters. If it fits — use the existing script.
+
+## Verify idempotency before scaling up
+
+**A script is not ready to run unsupervised until it has been verified idempotent: run it at least 3 times with the same inputs and confirm the end state is identical each time.**
+
+### What idempotency means for a bench script
+
+| Run | Expected behavior |
+|-----|-------------------|
+| 1st | Fresh snapshot → timing captured → sheet written |
+| 2nd | Same — `full_refresh_selection` resets checkpoint → another snapshot → sheet overwritten with same result ±network variance |
+| 3rd | Same again — no drift, no accumulation, no error |
+
+A script is **not** idempotent if:
+- Run 2 fails because run 1 left the pipeline in a bad state
+- Run 2 writes 0 rows because the cursor watermark was not reset
+- Run 2 writes to a different sheet row than run 1 (lookup broke)
+- Run 3 reports a different row count than runs 1 and 2 (source changed unexpectedly)
+
+### How to verify
+
+```bash
+# Run the script three times; compare actual_rows and sheet row on each pass
+for i in 1 2 3; do
+  echo "=== Run $i ==="
+  bash bench-run.sh azure-postgres public intpk_100k 100000
+  # Read sheet cell back: expected, timing, actual all populated
+done
+```
+
+After all three runs, read the sheet. The `actual rows` value should be the same across all three. The `duration_s` may vary by ±10–30% — that is expected noise, not a bug.
+
+**If run 2 or run 3 differs structurally (0 actual rows, FAILED state, wrong row written), stop and fix before scaling to larger tables.** The same idempotency bug will silently corrupt every subsequent run.
+
+### Apply idempotency checks before parallel scale-out
+
+The canary principle says "launch all DBs in parallel once the canary passes." The idempotency principle says "the canary must pass at least 3 times before you call it 'passed'."
+
+Correct sequence:
+```
+1. Run 100K canary once → verify D/E/H all populated correctly
+2. Run 100K canary again (same invocation) → same result
+3. Run 100K canary third time → same result
+4. Only then: launch 1M → 10M → 100M → 1B for that DB
+```
+
+## Two-actor execution model — Reviewer and Implementer
+
+Long-running benchmarks need two distinct mental roles operating simultaneously:
+
+### Reviewer (the "user" perspective)
+The Reviewer's job is to continuously answer: **"Does what is actually running match what should be running?"**
+
+**Check at every opportunity:**
+- What pipeline updates are RUNNING right now? (`/api/2.0/pipelines/{id}/updates?max_results=1`)
+- Do the running tables/sizes match the current goal state (e.g., "we are doing 100K verification")?
+- Are any background processes from a previous session still alive and consuming pipeline capacity?
+- Does the sheet reflect what the pipelines actually produced?
+
+**The Reviewer blocks forward progress when:**
+- An unrelated run occupies a needed pipeline (e.g., a 1B run blocks a 1M re-run)
+- A background process is looping on a CANCELED update instead of the intended one
+- The sheet row shows data from a stale/wrong pipeline
+
+**Concrete Reviewer checks before launching any re-run:**
+```bash
+# 1. Check for running processes from prior sessions
+ps aux | grep "bench-run\|databricks"
+
+# 2. Check pipeline idle state for each pipeline you intend to use
+databricks api get /api/2.0/pipelines/{PIPELINE_ID}/updates?max_results=1 \
+  --profile "$WORKSPACE_PROFILE" | jq '.updates[0] | {state, update_id}'
+
+# 3. Read sheet to confirm goal state matches actual state
+# Sheet rows you expect to be empty should be empty; rows with stale data should be identified
+```
+
+### Implementer (the agent)
+The Implementer executes steps but **is expected to make mistakes**, especially:
+- Attaching to the wrong active update when launching re-runs
+- Not checking whether a pipeline is clear before starting
+- Not realizing an old script's background process is still running
+- Missing that the current goal is "100K verification" while accidentally launching 1B runs
+
+**Implementer discipline:**
+1. Before any `bench-run.sh` invocation, confirm the pipeline is IDLE (not RUNNING/INITIALIZING)
+2. Before launching parallel re-runs, check which processes are already running (`ps aux`)
+3. Keep the current goal visible — write it as a `TODO` comment at the top of every session
+4. When a background log shows unexpected behavior, stop and report to Reviewer before continuing
+
+### Goal-state tracking
+At the start of every session, write the current goal explicitly:
+
+```
+CURRENT GOAL: Verify all 12 × 100K rows in sheet have correct pipeline_id,
+              duration_s, and actual_rows before proceeding to 1M.
+```
+
+Check every running and queued action against this goal. If an action (e.g., a 1B re-run) doesn't serve the current goal, stop it.
+
+## Fail-fast: never advance to a larger workload until the smaller one is fully verified
+
+This is the single most important sequencing rule.
+
+**Rule: ALL rows at size N must be correct before ANY row at size N+1 is started.**
+
+"Correct" means every row at size N has:
+- Column E (duration_s): non-empty
+- Column F (pipeline_id): from the correct catalog/pipeline
+- Column G (update_id): non-empty
+- Column H (actual_rows): populated OR confirmed as a known-fast-run gap
+
+If even one row at size N is empty, partial, or from a wrong pipeline, stop. Fix size N first.
+
+**Why this matters:**
+- A script bug at 100K will silently corrupt every 1M → 10M → 100M → 1B run after it
+- Debugging a corrupt 100M run is 1000× harder than debugging the same bug at 100K
+- If you fix the bug at 100K first, all larger sizes get the correct version for free
+
+**Concrete gate check before advancing from 100K to 1M:**
+```bash
+# Read sheet, show only 100K rows — every row must have columns E, F, G non-empty
+curl -s ... "Sheet1!A1:H61" | jq -r '
+  .values | to_entries[]
+  | select(.value[3] == "100,000")
+  | "\(.key+1)\t\(.value[4] // "MISSING-E")\t\(.value[5] // "MISSING-F")\t\(.value[7] // "no-H")"'
+```
+
+If any row shows `MISSING-E` or `MISSING-F`, that row must be re-run before proceeding.
+
+**The ordering error to avoid:**
+```
+❌ Wrong: row 7 (100K) empty → launch 1M re-runs anyway to fix stale data
+✅ Right:  row 7 (100K) empty → fix row 7 (100K) first → verify → then launch 1M
+```
+
+Even if the 1M re-runs are motivated by a different issue (wrong pipeline catalog), do not launch them while any 100K row is incomplete. The fix cost at 100K is seconds; the debugging cost at 1M+ is minutes to hours.
+
 ## Anti-patterns to avoid
 
 - **Don't assume state** — never skip Phase 0 because "it probably worked last time".
@@ -246,3 +582,8 @@ mysql -u dba_user -p"$PW" -e "SELECT MAX(pk) FROM intpk_1m;" robert_lee_png_db
 - **Don't pick design defaults silently** — always surface ambiguous choices to the user.
 - **Don't skip "What I cannot do"** — if anything requires user input, it must appear in that table.
 - **Don't background without monitoring first run** — the first run after any change must complete successfully before waiting for subsequent iterations.
+- **Don't leave `chronology-N.md` pointing to a missing `chronology-(N+1).md`** — always create the stub immediately when closing a run entry.
+- **Don't create a new script file for every variant** — add an argument to the existing generic script instead.
+- **Don't call a canary "passed" after one run** — verify idempotency (3 identical runs) before scaling up.
+- **Don't advance to a larger workload while any smaller workload row is incomplete** — fix 100K before touching 1M, fix 1M before touching 10M. No exceptions.
+- **Don't let test objects accumulate in a pipeline** — configure `objects[]` with exactly what the test requires (one for a single-table benchmark, two for a two-table test). Appending instead of replacing leaves stale objects that pollute every subsequent run. Always replace, never append.

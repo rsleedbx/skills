@@ -171,6 +171,87 @@ Rules and a complete helper extraction example: see [script-structure-examples.m
 
 Do not add `cmd_foo() { only_one_pipeline; }` when the body is a single pipeline used once — put it inline in the `case` arm. Keep a named function when the body is non-trivial, reused, or needs a stable name for testing.
 
+## Monitoring long-running shell commands — use `block_until_ms: 0` + Await, never `nohup … &`
+
+**Root cause pattern to avoid:** Running `nohup <cmd> > /tmp/logfile &` inside a Shell tool call, then reading `/tmp/logfile` in a subsequent Shell call.
+
+This fails for two reasons:
+1. **No Shell ID** — backgrounding with `&` inside the shell gives a PID but not a Shell tool ID. The Await tool cannot monitor it. You are flying blind.
+2. **Sandbox mismatch** — if the `nohup` call used `required_permissions: ["all"]` (non-sandboxed) but the follow-up `cat /tmp/logfile` uses default sandbox, the sandboxed shell may block reading the file, causing `cat` to hang indefinitely (appearing as "interrupted after Nms" with N = hours, because the Cursor UI timed out waiting for it — not because `cat` actually ran that long).
+
+**Correct pattern:** Set `block_until_ms: 0` on the Shell tool call itself. The tool moves the entire command to the background and returns a Shell ID. Then use Await to monitor completion via regex.
+
+```
+# Shell tool params:
+block_until_ms: 0          ← backgrounds the command; returns Shell ID
+required_permissions: [all] ← consistent permission for any follow-up reads
+
+# Then:
+Await(task_id=<Shell ID>, pattern="Done\\.|exit_code: 0", block_until_ms=300000)
+```
+
+**Rule:** `nohup … &` inside a Shell tool call is ONLY acceptable when you do not need to detect completion — e.g. launching a daemon whose output you will never read. For any long-running command where you need to know when it finishes, always use `block_until_ms: 0` on the Shell tool.
+
+**Follow-up reads:** Always use `required_permissions: ["all"]` for any Shell call that reads files created by a non-sandboxed process. Sandbox and non-sandbox processes do not share `/tmp` visibility in the same way.
+
+## Duration estimates — set `block_until_ms` from expected range, not arbitrarily
+
+**The problem:** Without a duration expectation, the agent sets `block_until_ms` arbitrarily and cannot distinguish "still running normally" from "hung." History files are not needed — rough order-of-magnitude estimates per operation type are sufficient to detect a hung command.
+
+**Rule:** Before backgrounding any command, look up its expected range below. Set `block_until_ms` in Await to `max_expected × 1.5`. If Await returns without matching the success pattern, the command has exceeded its expected range — **investigate immediately; do not keep waiting.**
+
+### Database index creation — `CREATE INDEX` / `ALTER TABLE … ADD INDEX`
+
+Estimates assume a mid-range Azure VM or Flexible Server (8–16 vCores, SSD). Multiply by 3–5× for spinning disk or heavily loaded servers.
+
+| Rows | PostgreSQL `CONCURRENTLY` | SQL Server (blocking) | MySQL `INPLACE LOCK=NONE` |
+|------|--------------------------|----------------------|--------------------------|
+| 100K | < 5 s | < 5 s | < 5 s |
+| 1M | 5–30 s | 5–30 s | 5–30 s |
+| 10M | 30 s – 3 min | 30 s – 3 min | 30 s – 3 min |
+| 100M | 3 – 15 min | 3 – 15 min | 3 – 15 min |
+| 1B | 15 – 60 min | 15 – 60 min | 15 – 60 min |
+
+SQL Server also requires **temp sort space** ≈ 10–20% of table size. If the filegroup or tempdb is full, the command fails immediately (not a timeout).
+
+### LFC QBC snapshot ingestion — snapshot phase only
+
+Estimates assume Databricks serverless, standard Azure network path. PNG adds < 5% overhead.
+
+| Rows | Expected range | Notes |
+|------|---------------|-------|
+| 100K | 10 – 60 s | canary; should be fast |
+| 1M | 30 s – 5 min | |
+| 10M | 3 – 15 min | |
+| 100M | 10 – 60 min | |
+| 1B | 30 min – 4 hr | varies widely by engine and row width |
+
+A QBC snapshot that exceeds 2× the upper bound without reaching COMPLETED is hung or has a resource bottleneck — check pipeline events before waiting further.
+
+### Azure VM / disk operations
+
+| Operation | Expected range |
+|-----------|---------------|
+| `az vm deallocate` | 1 – 5 min |
+| `az disk update --size-gb` (offline) | 10 – 30 s |
+| `az vm start` | 1 – 3 min |
+| `growpart` + `resize2fs` / `xfs_growfs` | < 10 s (online resize) |
+| `az vm run-command invoke` (simple script) | 30 s – 3 min |
+
+### How to apply
+
+```
+# Example: CREATE INDEX CONCURRENTLY on 100M rows → max ~15 min → block_until_ms = 15*60*1000*1.5 = 1350000
+Await(task_id=<id>, pattern="CREATE INDEX|Done", block_until_ms=1350000)
+
+# If Await returns without pattern match → exceeded expected range → investigate:
+#   - Check if process is still running (ps aux)
+#   - Check DB logs or pg_stat_activity / sys.dm_exec_requests
+#   - Do NOT just set a larger block_until_ms and keep waiting
+```
+
+**Why not a history file?** The agent only needs to distinguish *hung* from *running slowly*. Rough ranges make that distinction. The benchmark results sheet serves as historical LFC timing data for anomaly detection once a baseline exists. Maintaining a separate history file adds overhead and becomes stale as hardware and load change.
+
 ## Cloud CLI wrappers — use `CMD`, not `$()`
 
 See the `shell-cmd-wrapper` skill for the full `CMD` implementation. Key principle: never use `$()` or `2>/dev/null` for REST API calls (`az`, `aws`, `gcloud`, `databricks`, `mysql`, etc.) — they silently swallow errors and can hang on API outages.
