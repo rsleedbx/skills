@@ -252,6 +252,22 @@ Await(task_id=<id>, pattern="CREATE INDEX|Done", block_until_ms=1350000)
 
 **Why not a history file?** The agent only needs to distinguish *hung* from *running slowly*. Rough ranges make that distinction. The benchmark results sheet serves as historical LFC timing data for anomaly detection once a baseline exists. Maintaining a separate history file adds overhead and becomes stale as hardware and load change.
 
+## Line-shortening patterns — apply by default in every new script
+
+Six techniques measured across 9 real scripts (~1500 lines). Applying all six saves **~102 lines**
+and shortens dozens more. Full patterns with before/after: see [line-shortening.md](line-shortening.md).
+
+**Quick reference — apply these whenever the trigger condition is met:**
+
+| Technique | Trigger | Savings |
+|---|---|---|
+| `_D="$(dirname "${BASH_SOURCE[0]}")"` — define once, use for every `source` | 2+ `source` calls in the same file | lines shortened |
+| `_RG=(--resource-group "$RG")` — expand with `"${_RG[@]}"` on every `az` call | 5+ `az` calls share the same flag | **~52 lines** in 6 scripts |
+| `declare -A _PARAMS=(...); for _p ...; do fn "$_p" ...; done` — table-driven calls | 4+ identical function calls in a block | ~2 lines per table |
+| `cat <<EOF ... EOF` heredoc — use `${VAR}` braces inside | 8+ consecutive `echo` lines | easier editing |
+| `jq -n '{ key: $ENV.var }'` — drop `--arg` chains; validate required fields in bash first | 5+ `--arg` lines in one `jq -n` call | **~23 lines** per heavy builder |
+| `for _v in A B C; do [[ -n "${!_v:-}" ]] \|\| { echo ... kill; }; done` | 4+ parallel `${VAR:?}` guards with same error | **~18 lines** in 6 scripts |
+
 ## Cloud CLI wrappers — use `CMD`, not `$()`
 
 See the `shell-cmd-wrapper` skill for the full `CMD` implementation. Key principle: never use `$()` or `2>/dev/null` for REST API calls (`az`, `aws`, `gcloud`, `databricks`, `mysql`, etc.) — they silently swallow errors and can hang on API outages.
