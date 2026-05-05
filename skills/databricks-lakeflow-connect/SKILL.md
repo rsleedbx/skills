@@ -274,7 +274,61 @@ export UC_SCHEMA="db_ingest_${_DB_KEY_SAFE}_${ROUTING}"
 | UC connection (PNG) | `{user_prefix}-{cloud}-{engine}` | `robert-lee-azure-mysql` |
 | UC connection (public) | `{user_prefix}-{cloud}-{engine}-public` | `robert-lee-azure-mysql-public` |
 | VM-hosted connection | `{user_prefix}-vm-{engine}` | `robert-lee-vm-mysql` |
-| Secret scope key | `{cloud}-{engine}` or `vm-{engine}` | `azure-mysql`, `vm-postgres` |
-| Pipeline UC schema | `db_ingest_{db_key}_{routing}` | `db_ingest_azure_mysql_public` |
+| Databricks secret key | Server/VM name (FQDN or resource name) | `robert-lee-png-mysql-eastus2`, `robert-lee-mysql-vm` |
+| Pipeline UC schema | `db_ingest_{db_alias}_{routing}` | `db_ingest_azure_mysql_public` |
 
 Underscores in database names avoid quoting requirements in all three SQL dialects (MySQL backticks, PostgreSQL double-quotes, SQL Server square brackets).
+
+**Secret key vs connection alias**: The Databricks secret key is the server/VM name (authoritative, unique per deployment). The UC connection name uses a type alias (`{cloud}-{engine}`) derived from `cloud.provider` + `db_type` fields inside the loaded secret — not from the key itself. This decoupling lets `databricks-3-setup-uc-lakeflow.sh` build correct connection names even when the key is a full server FQDN.
+
+## UC connection comment key
+
+The `comment` field in `_build_uc_conn_json` embeds the Databricks secret key so `_uc_connection_upsert` can look up the local secret for lineage recording. **This key must match the actual secret key used by `save_db_secret`** (the server/VM name), not a hardcoded type alias.
+
+```bash
+# CORRECT — uses the server name variable that matches save_db_secret's key
+_build_uc_conn_json "${CONN_NAME}" MYSQL "${MYSQL_SERVER_NAME}" ...
+
+# WRONG — hardcoded alias; _lineage_jq_inplace can't find the file and silently skips
+_build_uc_conn_json "${CONN_NAME}" MYSQL "azure-mysql" ...
+```
+
+For VM scripts, use `${VM_NAME}` (not a hardcoded `vm-mysql`/`vm-postgres`/`vm-sqlserver`).
+
+## Secret discovery in databricks-3-setup-uc-lakeflow.sh
+
+Filter by engine name anywhere in the key — not by prefix:
+
+```bash
+# CORRECT — matches server-name keys like "robert-lee-png-mysql-eastus2"
+jq -r '.[] | select(.key | test("mysql|postgres|sqlserver")) | .key'
+
+# WRONG — misses server-name keys; only matches legacy "azure-mysql" / "vm-postgres" style
+jq -r '.[] | select(.key | test("^(azure|vm)-")) | .key'
+```
+
+Connection name derivation — use `cloud__provider` + `db_type` from the loaded secret, not `DB_SECRET_KEY`:
+
+```bash
+load_db_secret "${DB_SECRET_KEY}"
+_DB_ALIAS="${cloud__provider}-${db_type}"          # e.g. "azure-mysql"
+CONN_NAME="${USER_PREFIX}-${_DB_ALIAS}-public"     # e.g. "robert-lee-azure-mysql-public"
+```
+
+## Transient serializable error on UC connection PATCH
+
+`databricks api patch /api/2.1/unity-catalog/connections/<name>` can return:
+
+```
+MySQL serializable write transactions shouldn't read database version during the transaction
+```
+
+This is a **transient Databricks-internal error** — the connection IS updated despite the error. Use `PRINT_RETURN` (non-fatal), not `PRINT_EXIT`, so the script continues. The next run will re-apply the patch if genuinely needed.
+
+```bash
+CMD_EXIT_ON_ERROR=PRINT_RETURN CMD databricks api patch \
+  "/api/2.1/unity-catalog/connections/${_name}" \
+  --profile "$WORKSPACE_PROFILE" --json "$_patch_json"
+```
+
+Apply the same to `PATCH /api/2.1/unity-catalog/permissions/connection/<name>` — same transient risk.
