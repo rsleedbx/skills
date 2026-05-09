@@ -206,6 +206,119 @@ for item in items:
 
 ---
 
+## Use `@dataclass(frozen=True)` where possible
+
+Prefer frozen dataclasses over raw dicts and positional tuples whenever two or
+more related values travel together. The pattern applies in four concrete cases:
+
+### 1. Repeated dict-extraction (blob → fields)
+
+When the same `.get("key")` calls appear in multiple functions for the same
+blob shape, extract once into a dataclass with a `from_blob` factory:
+
+```python
+# Instead of repeating these 5 lines in every function that reads a conn_blob:
+db_type  = blob.get("db_type", "")
+host     = blob.get("host_fqdn", "")
+cloud    = blob.get("cloud") or {}
+provider = cloud.get("provider", "local")
+routing  = blob.get("routing") or {}
+
+# Define once:
+@dataclass(frozen=True)
+class _ConnBlobMeta:
+    db_type:  str
+    host:     str
+    provider: str
+    routing:  dict
+
+    @classmethod
+    def from_blob(cls, blob: dict) -> "_ConnBlobMeta":
+        cloud = blob.get("cloud") or {}
+        return cls(
+            db_type  = blob.get("db_type", ""),
+            host     = blob.get("host_fqdn", ""),
+            provider = cloud.get("provider", "local"),
+            routing  = blob.get("routing") or {},
+        )
+```
+
+### 2. Typed fallback chain (blob → cfg)
+
+When teardown reads values from a saved blob then falls back to `cfg`, use a
+typed factory so the fallback is written once:
+
+```python
+@dataclass(frozen=True)
+class AwsCtx:
+    region:  str
+    profile: str
+    vpc_id:  str
+
+def aws_ctx(blob: dict | str | None, cfg: Any) -> AwsCtx:
+    c = blob_cloud_ctx(blob)
+    return AwsCtx(
+        region  = c.get("region")  or getattr(cfg.aws, "region",  ""),
+        profile = c.get("profile") or getattr(cfg.aws, "profile", ""),
+        vpc_id  = c.get("vpc_id")  or getattr(cfg.aws, "vpc_id",  ""),
+    )
+
+# Teardown becomes one line instead of four:
+ctx = aws_ctx(lsec.read(scope, _server), cfg)
+session = aws_session(ctx.profile or None)
+rds = session.client("rds", region_name=ctx.region)
+```
+
+### 3. Internal tuple returns
+
+When a private helper returns 2–4 positional values and both callers unpack
+them, replace with a frozen dataclass. Positional tuples are silently wrong
+when types match; named attributes are typo-safe and self-documenting:
+
+```python
+# Before — positional, easy to swap
+def _cred_from_blob(...) -> tuple[str, str, str, str]:
+    return user, password, catalog, host
+
+user, password, catalog, host = _cred_from_blob(...)
+
+# After — named, impossible to swap silently
+@dataclass(frozen=True)
+class _RouteCred:
+    user: str; password: str; catalog: str; host: str
+
+cred = _cred_from_blob(...)
+url  = f"...{cred.user}:{cred.password}@{cred.host}/{cred.catalog}"
+```
+
+### 4. Repeated boilerplate blocks (load-or-generate + persist)
+
+When the same load-or-generate-then-persist logic appears in multiple modules,
+extract it to a helper in the module that owns the state:
+
+```python
+# Instead of this 4-line block in every */lfc.py:
+lfc_pws = {k: state.get(f"{epoch}/{k}_password") or gen_password() for k in LFC_USERS}
+for k, pw in lfc_pws.items():
+    state.put(f"{epoch}/{k}_password", pw)
+
+# Define once in state.py:
+def materialize_lfc_passwords(state: State, epoch: int) -> dict[str, str]: ...
+
+# Every lfc.py becomes one line:
+lfc_pws = materialize_lfc_passwords(state, epoch)
+```
+
+### When NOT to use a dataclass
+
+- Single call site with ≤3 fields — inline or use a local variable instead.
+- The object crosses a JSON wire format boundary — keep it a `dict` or `TypedDict`;
+  use a factory (`from_dict`) for construction but `asdict()` or manual `.get()`
+  for serialization.
+- A one-field wrapper — use an alias or `NewType` instead.
+
+---
+
 ## Pytest and Test Coverage
 
 - Use pytest. Tests in `tests/`; mirror package layout.
@@ -243,15 +356,23 @@ python -m pip install --upgrade pip
 python -m pip install pyright
 ```
 
-`pyrightconfig.json` at project root:
+`pyrightconfig.json` at the root of the source tree (same directory scripts run from):
 
 ```json
 {
+  "venvPath": "..",
+  "venv": ".venv_3_11",
   "pythonVersion": "3.11",
   "typeCheckingMode": "standard",
   "exclude": [".venv", ".venv_test", ".venv_3_11", "**/__pycache__"]
 }
 ```
+
+**`venvPath` + `venv` are mandatory.** Without them, Pyright cannot resolve any installed package and every third-party import fires `reportMissingImports` as a false positive. This floods the output with noise, making it impossible to distinguish real errors from missing stubs.
+
+`venvPath` is the directory that *contains* the venv folder; `venv` is the folder name:
+- venv at `src/.venv_3_11` → `"venvPath": "."`, `"venv": ".venv_3_11"`
+- venv at repo root `.venv_3_11`, config in `src/` → `"venvPath": ".."`, `"venv": ".venv_3_11"`
 
 ### Running
 
@@ -269,7 +390,24 @@ $PYRIGHT                   # whole project
 | `reportUnknownVariableType` | Annotate: `x: str = ...` |
 | `reportOptionalMemberAccess` | Guard: `if x is not None:` |
 | `reportReturnType` | Ensure all code paths return the declared type |
-| `reportMissingImports` | Install the package or add a stub |
+| `reportMissingImports` | Check venvPath/venv in pyrightconfig.json first; only then install stubs |
+
+### Module naming — never shadow installed packages
+
+**Never name a `.py` file the same as an installed package** that is on `sys.path`. Python resolves the local file first, turning the installed package into a broken namespace.
+
+```
+src/azure.py      ← shadows azure-identity → from azure.identity import ... fails at runtime
+src/google.py     ← shadows google-auth    → from google.auth import ... fails at runtime
+src/requests.py   ← shadows requests       → import requests fails at runtime
+```
+
+Pyright catches this **only when `pyrightconfig.json` has `venvPath`+`venv` configured**. Without the venv, Pyright already reports `reportMissingImports` for all installed packages, so the shadowing error looks identical to the pre-existing noise — the real error is invisible.
+
+Safe naming when you need a helper module for a cloud:
+- `azure.py` → `az_helpers.py`
+- `google.py` → `gcp_helpers.py`
+- `databricks.py` → `dbx_helpers.py`
 
 ### Type annotation conventions
 
@@ -347,10 +485,76 @@ Some packages install Jupyter Lab extensions with `package.json` files inside `.
 
 ---
 
+## CLI — use Typer, not argparse
+
+Typer is the standard for all CLI scripts. It uses the same type-hint pattern as FastAPI, so the same function works as a CLI command and as an importable FastAPI endpoint — zero code duplication.
+
+```bash
+python -m pip install typer
+```
+
+### Structure — two layers
+
+```python
+# Layer 1: data function — returns a dict, importable by FastAPI
+def get_az_identity(tenant_id: str | None = None) -> dict:
+    ...
+    return {"userPrincipalName": ..., "displayName": ...}
+
+# Layer 2: Typer CLI — formats and prints the dict
+app = typer.Typer()
+
+@app.command()
+def whoami(
+    tenant_id: Annotated[str | None, typer.Option(help="Azure AD tenant")] = None,
+) -> None:
+    data = get_az_identity(tenant_id=tenant_id)
+    typer.echo(typer.style("✓", fg=typer.colors.GREEN) + f"  {data['displayName']}")
+    raise typer.Exit(0)
+
+if __name__ == "__main__":
+    app()
+```
+
+FastAPI imports only layer 1 — never the CLI layer:
+
+```python
+from mymodule import get_az_identity   # data function only
+
+@api.get("/identity/az")
+def api_az(tenant_id: str | None = None) -> dict:
+    return get_az_identity(tenant_id=tenant_id)
+```
+
+### Key conventions
+
+| Pattern | Use |
+|---------|-----|
+| `Annotated[str \| None, typer.Option(help="...")]` | All CLI options — keeps type and metadata together |
+| `typer.style(text, fg=typer.colors.GREEN/RED/YELLOW)` | Colored output — never raw ANSI codes |
+| `raise typer.Exit(0)` / `raise typer.Exit(1)` | Exit codes — never `sys.exit()` |
+| `typer.echo(..., err=True)` | Errors to stderr |
+| `--only` repeated flag | `list[str] \| None` with `typer.Option()` |
+
+### `--only` repeating option pattern
+
+```python
+@app.command()
+def run(
+    only: Annotated[list[str] | None, typer.Option(
+        help="Run only these targets (repeat for multiple: --only az --only dbx)"
+    )] = None,
+) -> None:
+    targets = set(only) if only else {"az", "dbx", "gcp", "aws"}
+```
+
+---
+
 ## Checklist When Refactoring
 
 - [ ] **Ruff: 0 errors** — `ruff format <file>` → `ruff check --fix <file>` → `ruff check <file>`.
-- [ ] **Pyright: 0 errors** — `pyright <edited-files>`.
+- [ ] **Pyright: 0 errors** — `pyright <edited-files>`. Confirm `pyrightconfig.json` has `venvPath`+`venv` so errors are real, not venv-resolution noise.
+- [ ] **No module name shadows an installed package** — never name a `.py` file `azure`, `google`, `requests`, `databricks`, etc. Use `az_helpers`, `gcp_helpers`, `dbx_helpers` instead.
 - [ ] No bare `pip` or `pip3` — all installs use `python -m pip`.
 - [ ] Any new venv: `python -m ensurepip --upgrade` → `python -m pip install --upgrade pip` → `python -m pip install -r ...`.
 - [ ] Prerequisites checked once at entry; required deps preferred over optional dual paths.
@@ -359,3 +563,5 @@ Some packages install Jupyter Lab extensions with `package.json` files inside `.
 - [ ] Call sites and tests updated to new API; no backward-compat branches.
 - [ ] Invalid inputs rejected at the boundary with a clear error.
 - [ ] Existing tests still pass; new cases added to maintain coverage.
+- [ ] CLI uses Typer, not argparse — data functions return dicts; Typer layer formats output.
+- [ ] No `sys.exit()` in Typer commands — use `raise typer.Exit(code)` instead.

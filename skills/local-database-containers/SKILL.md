@@ -1,6 +1,6 @@
 ---
 name: local-database-containers
-description: Running databases locally on macOS via Podman, Lima, and Colima containers — the two-VM Apple Silicon architecture (VZ+Rosetta vs QEMU for DB2), three backend options (Podman Machine / Lima+nerdctl / Colima), container images and required flags for each engine (PostgreSQL, MySQL, CockroachDB, SQL Server, Oracle Free, DB2), readiness probe patterns, named volume conventions, find_free_port pattern, DB2-specific requirements (--ipc=host --privileged, first-boot timing, db2profile patch). Use when starting local database containers for development or testing, setting up statschema benchmarks, debugging DB2 IPC failures, choosing between Podman/Lima/Colima, or understanding why DB2 requires QEMU on Apple Silicon.
+description: Running databases locally on macOS via Podman, Lima, and Colima containers — the two-VM Apple Silicon architecture (VZ+Rosetta vs QEMU for DB2/Informix/Oracle), three backend options (Podman Machine / Lima+nerdctl / Colima), container images and required flags for each engine (PostgreSQL, MySQL, MariaDB, CockroachDB, SQL Server, Oracle Free, DB2, Informix, MongoDB), readiness probe patterns, named volume conventions, find_free_port pattern, DB2-specific requirements (--privileged, first-boot timing, catalog readiness), Informix requirements (OS/PAM auth, dbaccess CLI, WITH LOG for CDC), Oracle ARCHIVELOG timing, Lima socket stability (Lima 2.x SSH forwarder is reliable — use podman --connection, not limactl shell), registries.conf unqualified-search setup. Use when starting local database containers for development or testing, setting up statschema benchmarks, debugging DB2 IPC failures, choosing between Podman/Lima/Colima, understanding why DB2/Informix requires QEMU on Apple Silicon, or configuring the Podman socket connection for use with podman-compose and Testcontainers.
 ---
 
 # Local Database Containers (Podman / Lima / Colima)
@@ -13,20 +13,22 @@ On ARM64 Macs, you cannot run all databases in one VM. DB2 probes for x86-64-v2 
 
 | VM | vmType | Engines | Speed |
 |----|--------|---------|-------|
-| VM 1 (fast) | `vz` + Rosetta 2 | PostgreSQL, MySQL, CockroachDB, SQL Server, Oracle | ~1.5–2× native |
-| VM 2 (correct) | `qemu` (x86_64) | DB2 only | ~5–10× slower but correct |
+| VM 1 (fast) — `forgedb-vz` | `vz` + Rosetta 2 | PostgreSQL, MySQL, MariaDB, MongoDB, SQL Server 2019/2022, Oracle 23ai | ~1.5–2× native |
+| VM 2 (correct) — `forgedb-qemu` | `qemu` (x86_64) | DB2, Informix, Oracle 19c/21c | ~5–10× slower but correct |
+
+The Lima VM names used by the `forgedb` project are `forgedb-vz` (VZ) and `forgedb-qemu` (QEMU). Commands use `podman --connection <vm> ...` (via a registered system connection that routes through the Lima Unix socket).
 
 `vmType` is baked in at creation time and cannot be changed — delete and recreate if you need to change it.
 
 ## Three backend options
 
-| Backend | VM 1 CLI | VM 1 manager | DB2 command |
-|---------|----------|-------------|------------|
-| **Podman Machine** (`_common.sh`) | `podman run` | `podman machine` (transparent) | `limactl shell db2 -- sudo podman ...` |
-| **Lima + nerdctl** (`_common_lima.sh`) | `limactl shell statschema -- sudo nerdctl ...` | `limactl` | `limactl shell db2 -- sudo podman ...` |
-| **Colima** (`_common_colima.sh`) | `nerdctl run` | `colima` (wraps Lima) | `limactl shell db2 -- sudo podman ...` |
+| Backend | VM 1 CLI | VM 1 manager | QEMU VM command |
+|---------|----------|-------------|----------------|
+| **Podman Machine** (`_common.sh`) | `podman run` | `podman machine` (transparent) | `limactl shell forgedb-qemu -- sudo podman ...` |
+| **Lima + nerdctl** (`_common_lima.sh`) | `limactl shell forgedb-vz -- sudo nerdctl ...` | `limactl` | `limactl shell forgedb-qemu -- sudo podman ...` |
+| **Colima** (`_common_colima.sh`) | `nerdctl run` | `colima` (wraps Lima) | `limactl shell forgedb-qemu -- sudo podman ...` |
 
-All three setups use exactly two VMs for full coverage. The difference is only how VM 1 is managed. DB2 always uses the Lima QEMU `db2` VM.
+All three setups use exactly two VMs for full coverage. The difference is only how VM 1 is managed. DB2 and Informix always use the Lima QEMU `forgedb-qemu` VM.
 
 ### Podman Machine (simplest)
 
@@ -42,16 +44,16 @@ podman run ...                 # proxied transparently to the VM
 
 ```bash
 # Create the VZ VM with Rosetta (arm64)
-limactl create --name statschema \
+limactl create --name forgedb-vz \
   --set '.vmType = "vz"' \
   --set '.vmOpts.vz.rosetta.enabled = true' \
   --set '.vmOpts.vz.rosetta.binfmt = true' \
   template:default
-limactl start statschema
-limactl shell statschema -- sudo systemctl enable --now containerd
+limactl start forgedb-vz
+limactl shell forgedb-vz -- sudo systemctl enable --now containerd
 
 # Wrapper function used in scripts
-_lnerdctl() { limactl shell "${LIMA_VM:-statschema}" -- sudo /usr/local/bin/nerdctl "$@"; }
+_lnerdctl() { limactl shell "${LIMA_VM:-forgedb-vz}" -- sudo /usr/local/bin/nerdctl "$@"; }
 ```
 
 ### Colima
@@ -108,6 +110,22 @@ podman run -d --name "crdb${VERSION}" \
 - Readiness: `podman exec $container /cockroach/cockroach sql --insecure -e "SELECT 1"`
 - Grant: `CREATE USER IF NOT EXISTS user; GRANT ALL ON DATABASE catalog TO user; ALTER USER user CREATEDB;`
 
+### MariaDB
+
+```bash
+podman run -d --name "mariadb${VERSION}" \
+  -v "mariadb${VERSION}-data:/var/lib/mysql" \
+  -p "${PORT}:3306" \
+  -e MARIADB_ROOT_PASSWORD="$dba_pass" \
+  "mariadb:${VERSION}"
+```
+
+- Multi-arch image (ARM64 native on Apple Silicon) — runs in `forgedb-vz`
+- **CLI binary**: MariaDB 11.4+ ships `mariadb` (not `mysql`). The `mysql` binary is still present as an alias in 11.4 but may be absent in future versions. Always invoke `mariadb` explicitly.
+- **SQLAlchemy dialect**: use `mariadb+pymysql://` — the `mariadb://` dialect alone defaults to `MySQLdb` which is not installed; explicitly map `mariadb` → `pymysql` in driver config.
+- Readiness: `podman exec $container mariadb -u root -p"${dba_pass}" -e "SELECT 1"` (use `mariadb` binary, not `mysql`)
+- Env var for password in scripts: `MYSQL_PWD` is accepted by the `mariadb` binary (same as `mysql`)
+
 ### SQL Server
 
 ```bash
@@ -117,12 +135,14 @@ podman run -d --name "sqlserver${VERSION}" \
   --platform linux/amd64 \
   -e ACCEPT_EULA=Y \
   -e MSSQL_SA_PASSWORD="$dba_pass" \
+  -e MSSQL_AGENT_ENABLED=true \
   "mcr.microsoft.com/mssql/server:${VERSION}"
 ```
 
-- `--platform linux/amd64` required — no native ARM64 image; Rosetta 2 translates
+- `--platform linux/amd64` required — no native ARM64 image; Rosetta 2 translates (SQL Server 2019/2022 run in `forgedb-vz`)
 - Default version: `2022-latest` (SQL Server 2025 known not to work with macOS Rosetta at time of testing)
 - Default base port: `1433`
+- **`MSSQL_AGENT_ENABLED=true` is required for CDC** — SQL Server Agent runs the CDC capture jobs; without it, CDC is enabled at the database level but changes are never captured into the CDC change tables. Always include this env var when provisioning for CT+CDC (`BOTH` mode).
 - Readiness: `podman exec $container /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$dba_pass" -Q "SELECT 1" -b`
 - `-C` = trust server certificate (self-signed inside container)
 
@@ -144,53 +164,206 @@ podman run -d --name "oracle${VERSION}" \
   "container-registry.oracle.com/database/free:${VERSION}"
 ```
 
-- Default PDB: `FREEPDB1` (env var chain: `DB_ORA_CATALOG` → `DB_ORA_DATABASE` → `ORACLE_PDB` → `FREEPDB1`)
+- Default PDB: `FREEPDB1` (Oracle Free) — derived automatically from the image version
 - `--shm-size=1g` required for Oracle shared memory
-- Oracle Free has a native ARM64 image — Podman defaults to pulling x86_64 without `--platform linux/arm64`
-- Readiness probe must use TCP + `-L` flag: `sqlplus -L -S "system/${pass}@//localhost:1521/${PDB}"` — without `-L`, sqlplus reads EXIT from stdin and exits 0 even when the PDB is not yet registered (ORA-12514 false positive)
-- Init takes ~60s; use `wait_db` with 180s timeout
+- Oracle 23ai Free has a native ARM64 image → runs in `forgedb-vz`. Oracle 19c/21c are x86_64-only and Rosetta fails → must use `forgedb-qemu`.
+- **Public gvenzl images** (no Oracle SSO login required): `gvenzl/oracle-xe:21`, `gvenzl/oracle-free:23`. Use `ORACLE_PASSWORD` env var (not `ORACLE_PWD`) with these images.
+- Readiness probe must use `can_connect()` (TCP + actual SELECT), not just TCP — the TCP port opens before the PDB is registered (ORA-12514 false positive if you check TCP only). Poll until `SELECT 1 FROM DUAL` succeeds.
+- Init takes 3–8 min; poll with 600 s timeout.
+- **ARCHIVELOG + supplemental logging timing**: After running the SHUTDOWN/STARTUP MOUNT/ALTER DATABASE ARCHIVELOG/OPEN sequence inside the container, the CDB root service (e.g. `FREE`) takes additional time to accept connections even though the PDB accepts them immediately. **Must re-poll `can_connect()` on the PDB** after ARCHIVELOG restart before calling the supplemental logging configure step (`ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY) COLUMNS`). Without this wait, the CDB connection fails silently and supplemental logging is skipped.
 
 ### DB2 (QEMU Lima VM — always)
 
-DB2 always runs inside the Lima QEMU `db2` VM:
+DB2 always runs inside the Lima QEMU `forgedb-qemu` VM:
 
 ```bash
-# Run DB2 container inside the Lima db2 VM
-limactl shell db2 -- sudo podman run -d --name db2ce \
-  -v db2_data:/database \
+# Run DB2 container through the registered Podman connection
+podman --connection forgedb-qemu run -d --name lfc-db2-115 \
+  -v lfc-db2-115-data:/database:Z \
   -p 50000:50000 \
-  --platform linux/amd64 \
   --privileged \
-  --ipc=host \
   -e DB2INST1_PASSWORD="$dba_pass" \
   -e DBNAME="${catalog}" \
   -e LICENSE=accept \
-  "icr.io/db2_community/db2:${VERSION}"
+  -e ARCHIVE_LOGS=false \
+  -e AUTOCONFIG=false \
+  "icr.io/db2_community/db2:latest"
 ```
 
 **Critical flags:**
-- `--ipc=host` — required: DB2 uses System V IPC shared memory (`db2ftok`); isolated IPC namespace returns `ENOTSUP` under Rosetta 2
-- `--privileged` — required by IBM for DB2 container
-- `--platform linux/amd64` — no native ARM64 image
+- `--privileged` — required by IBM for DB2 (grants System V IPC and other kernel capabilities needed by `db2ftok`)
+- No `--platform linux/amd64` needed when running in `forgedb-qemu` (QEMU presents as x86_64)
+- `:Z` suffix on the volume mount — required for SELinux relabeling inside the QEMU VM
 
-**First-boot timing:** DB2 runs a ~300s initialization (Task #3: `db2iupdt`). TCP port 50000 opens before DB2 is ready — `wait_port` alone gives false positives. Always wait for the init-done sentinel file before running provisioning:
+**Three-stage readiness check — all three must pass before configuring:**
 
-```bash
-# Wait for IBM's setup_db2_instance.sh to complete (writes this file as last step)
-podman exec db2ce test -f /database/config/.shared-data/setup_complete
+1. **Log sentinel**: Wait for `"Setup has completed"` in container logs (up to 35 min under QEMU). TCP port 50000 opens before DB2 is ready — polling TCP alone gives false positives.
+2. **TCP reachability**: Poll `tcp_reachable("localhost", 15000)` until the port responds.
+3. **Catalog availability**: Even after TCP is reachable, the `lfctest` catalog is not immediately accessible — DB2 registers it in its directory slightly after the port opens. Poll `can_connect(host, port, "db2inst1", pw, catalog)` (runs `SELECT 1 FROM SYSIBM.SYSDUMMY1`) until it succeeds. Skipping this step causes `SQL30061N: database not found` errors from provisioning code.
 
-# Then probe with real connection
-su - db2inst1 -c ". ~/sqllib/db2profile && db2 connect to ${catalog^^}"
+```python
+# Correct readiness sequence (forgedb db2/podman.py)
+podman_wait_for_log(container, "Setup has completed", timeout=2100)
+# TCP poll ...
+while not tcp_reachable("localhost", host_port): time.sleep(5)
+# Catalog poll — critical, do not skip
+while not can_connect("localhost", host_port, "db2inst1", pw, catalog): time.sleep(5)
 ```
 
-**Rosetta 2 db2profile patch** — during init, some `su - db2inst1` invocations fail with "db2: command not found" due to transient IPC state. Patch every script in `/var/db2_setup/` to prepend `. ~/sqllib/db2profile &&`:
+**DB2 database name limit:** 8 characters maximum. Use `lfctest` (7 chars) not `lfctestdb`.
+
+### Informix (QEMU Lima VM — always)
+
+IBM Informix Developer Database is x86_64-only → runs in `forgedb-qemu`:
 
 ```bash
-limactl shell db2 -- sudo podman exec db2ce \
-  bash -c "sed -i 's|su - db2inst1 -c|su - db2inst1 -c \". ~/sqllib/db2profile \&\& |g' /var/db2_setup/*.sh"
+podman --connection forgedb-qemu run -d --name lfc-informix-1410 \
+  -v lfc-informix-1410-data:/opt/ibm/data \
+  -p 9088:9088 \
+  --privileged \
+  -e LICENSE=accept \
+  -e INFORMIX_PASSWORD="$adm_pass" \
+  -e DB_INIT=1 \
+  -e DBNAME=lfctest \
+  "icr.io/informix/informix-developer-database:latest"
 ```
 
-**DB2 database name limit:** 8 characters maximum. Use `statsch` not `statschema`.
+- Container port `9088` is forwarded to macOS host port `19088` via Lima portForward in `forgedb-qemu.yaml`
+- Readiness: Wait for `"Informix Dynamic Server Started"` in logs (up to 10 min), then poll TCP
+- **OS / PAM authentication**: Informix authenticates users by OS identity — every database user must exist as an OS user inside the container (`useradd -m -g informix <user>`). There is no password-based SQL auth.
+- **`dbaccess` CLI for SQL**: IfxPy Python driver requires the Informix CSDK which has no pre-built macOS ARM64 binary. Execute all SQL via `dbaccess` inside the container using `podman exec -u <os_user>`.
+- **Environment variables must be injected**: `dbaccess` is only on PATH when Informix environment variables are set. Either use a login shell (`bash -l -c`) to source the informix user's profile, or explicitly inject:
+  ```
+  INFORMIXDIR=/opt/ibm/informix/v15.0.1.0.3
+  INFORMIXSERVER=informix
+  PATH=$INFORMIXDIR/bin:/usr/local/bin:/usr/bin:/bin
+  ```
+- **`CONNECT TO ... USING 'password'` is NOT supported** by `dbaccess` — it uses OS user identity only. Attempting this syntax produces `USING clause unsupported. DB-Access will prompt you for a password.`
+- **`WITH LOG` required for CDC**: Databases must be created `WITH LOG` to enable transaction logging. A database created without `WITH LOG` cannot support CDC (`is_logging=0` in `sysmaster:sysdatabases`).
+- **User grants for LFC**: `GRANT CONNECT TO <user>; GRANT RESOURCE TO <user>; GRANT DBA TO <user>;`
+
+---
+
+## Lima socket stability — Lima 2.x uses SSH forwarder (reliable)
+
+**Lima 1.0.1 (Nov 2024) fixed the socket proxy.** Before 1.0.1, Lima used a gRPC port forwarder that panicked under load, forcing use of `limactl shell` (SSH) as a workaround. Since 1.0.1, Lima reverted to SSH port forwarding as the default, which is stable.
+
+**Confirmed working in Lima 2.1.1 (tested May 2026):** After a clean `limactl stop` + `limactl start`, the socket at `~/.lima/<vm>/sock/podman.sock` is stable and `podman --connection <vm>` works reliably with no EOF errors.
+
+**Verified behaviours:**
+- `CONTAINER_HOST=unix://$HOME/.lima/forgedb-vz/sock/podman.sock podman --remote version` → returns server version with no EOF
+- `podman --connection forgedb-vz ps` → works reliably
+- `podman-compose` via `CONTAINER_HOST` → resolves container-to-container DNS (hostname `postgres` → IP), pulls images, `SELECT 1` returns correctly
+- The Lima boot log shows `Forwarding "/run/podman/podman.sock" (guest) to "~/.lima/forgedb-vz/sock/podman.sock" (host)` when the socket is active
+
+**The correct approach — use `podman --connection`:**
+
+```bash
+# Register the connection once (setup_local_env.py does this automatically)
+podman system connection add forgedb-vz "unix://$HOME/.lima/forgedb-vz/sock/podman.sock"
+podman system connection add forgedb-qemu "unix://$HOME/.lima/forgedb-qemu/sock/podman.sock"
+podman system connection default forgedb-vz
+
+# Then use normally — no limactl shell needed
+podman --connection forgedb-vz ps
+podman --connection forgedb-qemu images
+```
+
+**Shell aliases (add to `~/.zshrc`):**
+
+```bash
+alias pvz='podman --connection forgedb-vz'      # MySQL / PostgreSQL / Oracle 23ai
+alias pqemu='podman --connection forgedb-qemu'  # Oracle 19c/21c / SQL Server / DB2
+```
+
+**For `podman-compose` and Testcontainers**, set `CONTAINER_HOST`:
+
+```bash
+export CONTAINER_HOST=unix://$HOME/.lima/forgedb-vz/sock/podman.sock
+podman-compose -f docker-compose.yml up
+```
+
+**Python `_base()` pattern** in `container_helpers.py`:
+
+```python
+def _base(connection: Optional[str]) -> list[str]:
+    if _RUNTIME == "docker":
+        return ["docker"]      # relies on DOCKER_HOST or default context
+    cmd = ["podman"]
+    if connection:
+        cmd += ["--connection", connection]
+    return cmd
+```
+
+No `limactl shell` branch needed. `podman --connection forgedb-vz` routes through the forwarded socket.
+
+**`limactl shell` is still needed for system administration** (not container operations):
+- Checking systemd status: `limactl shell forgedb-vz -- sudo systemctl is-active podman.socket`
+- Editing guest files: `limactl shell forgedb-vz -- sudo bash -c "..."`
+- `setup_local_env.py` uses it for `_ensure_podman_socket()`, `_ensure_registries_conf()`, `_configure_storage_conf()`
+
+**"Broken" state invalidates the socket.** If `limactl list` shows `Broken`, the Lima hostagent is down and the socket forwarder is not active — `podman --connection` will EOF. Always do a clean stop/start before testing the socket:
+
+```bash
+limactl stop forgedb-vz      # fully stops hostagent + VM
+limactl start forgedb-vz     # clean start; socket forwarder re-initializes
+limactl list forgedb-vz      # must show "Running", not "Broken"
+```
+
+A VM that shows "already running" after `limactl start` (because the VM process survived but hostagent died) may still have an inactive socket forwarder — verify with `limactl list` status.
+
+**Full delete/recreate** (only if stop/start fails — destroys all container volumes):
+
+```bash
+limactl delete forgedb-vz
+limactl start --name=forgedb-vz config/lima/forgedb-vz.yaml --tty=false
+```
+
+`vmType` and provisioned Podman configuration survive a stop/start. Named Podman volumes inside the VM are lost only on `limactl delete`.
+
+---
+
+## registries.conf — required for unqualified image names
+
+Podman inside the Lima guest (Ubuntu 24.04 apt ships Podman 4.9.3) has no unqualified-search registries configured by default. Pulling `postgres:16-alpine` (without `docker.io/library/` prefix) fails:
+
+```
+Error: short-name "postgres:16-alpine" did not resolve to an alias
+and no unqualified-search registries are defined in "/etc/containers/registries.conf"
+```
+
+**Fix (idempotent, run via `limactl shell`):**
+
+```bash
+limactl shell forgedb-vz -- sudo bash -c "
+  if ! grep -q 'docker.io' /etc/containers/registries.conf 2>/dev/null; then
+    printf '\n[registries.search]\nregistries = [\"docker.io\", \"quay.io\"]\n' \
+      >> /etc/containers/registries.conf
+  fi"
+```
+
+`setup_local_env.py` applies this automatically via `_ensure_registries_conf()` on every `step_lima_vm()` call. The Lima YAML provision scripts also include this step for new VMs.
+
+**Alternative: always use fully-qualified image names (safer long-term):**
+
+```bash
+docker.io/library/postgres:16-alpine   # instead of postgres:16-alpine
+docker.io/library/mysql:8.4            # instead of mysql:8.4
+```
+
+---
+
+## Podman client vs guest version mismatch
+
+The macOS Homebrew Podman client (5.8.1) and the Podman server inside an existing Lima VM (e.g. 4.9.3 from Ubuntu apt) may have different versions. The Podman API is generally backward compatible for basic operations. To upgrade the guest:
+
+```bash
+limactl shell forgedb-vz -- sudo apt-get update
+limactl shell forgedb-vz -- sudo apt-get install -y podman
+limactl shell forgedb-vz -- podman --version   # verify
+```
+
+For new VMs, the Lima YAML provision scripts install Podman 5.x from the kubic unstable repo.
 
 ---
 
@@ -270,14 +443,19 @@ wait_db() {
 
 ## Default port assignments
 
-| Engine | Default base port | Note |
-|--------|------------------|------|
-| PostgreSQL | `5432` | |
-| MySQL | `3384` | avoids clash with system MySQL on 3306 |
-| CockroachDB | `26257` | |
-| SQL Server | `1433` | |
-| Oracle | `1521` | |
-| DB2 | `50000` | |
+| Engine | Container port | macOS host port | Note |
+|--------|---------------|-----------------|------|
+| PostgreSQL | `5432` | dynamic | |
+| MySQL | `3306` | dynamic | |
+| MariaDB | `3306` | dynamic | |
+| CockroachDB | `26257` | dynamic | |
+| SQL Server | `1433` | dynamic | |
+| Oracle | `1521` | dynamic | |
+| MongoDB | `27017` | dynamic | |
+| DB2 | `50000` | `15000` | Lima portForward in forgedb-qemu.yaml: guestPort 50000 → hostPort 15000 |
+| Informix | `9088` | `19088` | Lima portForward in forgedb-qemu.yaml: guestPort 9088 → hostPort 19088 |
+
+DB2 and Informix use fixed Lima portForwards because `ibm_db_dbi` / `dbaccess` connect to known ports. All other engines use `find_free_port()` at provision time.
 
 ## Volume naming convention
 
@@ -315,9 +493,10 @@ These containers provision a basic app user and schema for benchmarks — **not*
 
 ## QEMU performance on Apple Silicon
 
-Running multiple QEMU VMs (DB2, SQL Server, Oracle in separate QEMU VMs) simultaneously saturates the host CPU. For benchmarks, use two-wave scheduling:
+Running multiple containers in `forgedb-qemu` simultaneously (DB2, Informix, Oracle 19c/21c) shares the single QEMU process's CPU budget. For full-suite `--rebuild` test runs, engines are provisioned sequentially within each VM. The VZ engines (MySQL, MariaDB, PostgreSQL, SQL Server, MongoDB, Oracle 23ai) all run in `forgedb-vz` and provision much faster.
 
-- **Wave 1** — Podman engines (PostgreSQL, MySQL, CockroachDB): run first, ~5 min
-- **Wave 2** — QEMU engines (SQL Server, Oracle, DB2): run after Wave 1 finishes, uncontested, ~33 min
-
-Running all QEMU engines simultaneously causes ~1.7× slowdown each due to shared CPU. See the statschema repo's `setup-lima-databases` skill for memory budgets and OOM caps per engine.
+Approximate first-boot times under QEMU:
+- DB2 first-boot: 20–30 min
+- Informix first-boot: 2–5 min
+- Oracle 19c/21c first-boot: 5–10 min
+- Oracle 23ai (VZ, native): 3–5 min

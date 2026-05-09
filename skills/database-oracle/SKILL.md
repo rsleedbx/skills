@@ -7,16 +7,30 @@ description: Oracle Database (RDS SE2, OCI Autonomous, on-premise) — SID vs se
 
 ## Cloud platform support
 
-| Platform | Managed Oracle service | Status |
-|----------|----------------------|--------|
-| **OCI** | Autonomous Database (Always Free) | ✅ Supported |
-| **AWS** | RDS Oracle SE2 | ✅ Supported |
-| **Azure** | None | ❌ No managed Oracle — VM required |
-| **GCP** | None | ❌ No Cloud SQL for Oracle — VM required |
+| Platform | Managed Oracle service | Versions available | Status |
+|----------|----------------------|--------------------|--------|
+| **OCI** | Autonomous Database (Always Free) | 19c, 21c, 23ai | ✅ Supported |
+| **AWS** | RDS Oracle SE2 | **19c, 21c only** | ✅ Supported |
+| **Azure** | None | N/A | ❌ No managed Oracle — VM required |
+| **GCP** | None | N/A | ❌ No Cloud SQL for Oracle — VM required |
 
 - **OCI Always Free**: Forever, 2 instances, 1 OCPU, 20GB, $0 — best for long-term dev
 - **AWS RDS Free Tier**: 12 months, `db.t3.micro`; after expiry ~$40/month for SE2
 - Provisioning: OCI 3–5 min; AWS RDS 10–15 min + `sleep 90` wait
+
+### AWS RDS Oracle: version alias pitfall ⚠️
+
+The `lts` and `latest` version aliases both resolve to **23ai**, which has `rds_value=""` and is **not available on AWS RDS**. The setup function exits if `rds_value` is empty.
+
+Always pass an explicit version for AWS RDS Oracle:
+```bash
+python cli/setup_oracle_aws.py --version 19c   # RDS SE2, Oracle 19c
+python cli/setup_oracle_aws.py --version 21c   # RDS SE2, Oracle 21c
+python cli/setup_oracle_aws.py                 # WRONG — lts → 23ai → exits with error
+```
+
+**Why Azure and GCP require a VM for Oracle:**
+Oracle's licensing model (SE2 requires CPU pinning and hard CPU limits) cannot be guaranteed by multi-tenant managed services. Neither Azure nor GCP offers a managed Oracle service. Use an Azure VM or GCP Compute Engine VM with Oracle Free or SE2, then configure via `oracle_configure(platform="vm")`.
 
 ## SID vs service name: the "catalog"
 

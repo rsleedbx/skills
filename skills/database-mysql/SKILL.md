@@ -1,6 +1,6 @@
 ---
 name: database-mysql
-description: MySQL 5.7 / 8.0 / MariaDB — authentication models (auth_socket vs password), root@localhost vs root@%, Ubuntu debian-sys-maint admin channel, required LFC user grants and binlog server parameters, bind-address configuration, identifier quoting with backticks, MySQL 8 vs 5.7 differences (caching_sha2_password, invisible PKs). Use when creating MySQL users, writing grants, configuring binlog replication, understanding auth_socket, finding the admin channel when root password is lost/stale, or debugging MySQL connectivity.
+description: MySQL 5.7 / 8.0 / MariaDB — authentication models (auth_socket vs password), root@localhost vs root@%, Ubuntu debian-sys-maint admin channel, required LFC user grants and binlog server parameters, bind-address configuration, identifier quoting with backticks, MySQL 8 vs 5.7 differences (caching_sha2_password, invisible PKs), cloud-specific admin usernames and binlog parameter names (AWS RDS mysqladmin, GCP expire_logs_days). Use when creating MySQL users, writing grants, configuring binlog replication, understanding auth_socket, finding the admin channel when root password is lost/stale, debugging MySQL connectivity, or adapting configuration across AWS/GCP/Azure.
 ---
 
 # MySQL — Database Reference
@@ -239,6 +239,20 @@ curl -v --connect-timeout 5 telnet://"${HOST}:${PORT}"
 | `require_secure_transport` default | `OFF` | `OFF` (but some managed services enable it) |
 
 > **`caching_sha2_password` compatibility**: Older MySQL clients may not support it. If clients get "Authentication plugin not supported" errors, either upgrade the client or set `default_authentication_plugin=mysql_native_password` in the server config.
+
+## Cloud-specific differences
+
+| Item | On-premise / VM | AWS RDS | GCP Cloud SQL | Azure Flexible Server |
+|------|-----------------|---------|---------------|-----------------------|
+| Admin username | `root` | **`mysqladmin`** (`root` reserved) | `root` (+ separate admin user via Users API) | `mysqladmin` (configurable) |
+| Binlog expiry param | `binlog_expire_logs_seconds` | `binlog_expire_logs_seconds` | **`expire_logs_days`** (Cloud SQL flag name) | `binlog_expire_logs_seconds` |
+| Set params | `SET GLOBAL` / `my.cnf` | Parameter group (pending-reboot) | `databaseFlags` in instance settings | `az mysql flexible-server parameter set` |
+| Binary log enable | `log_bin=ON` in my.cnf | Automatic when param group applied | `backupConfiguration.binaryLogEnabled=true` | Automatic |
+| Secure transport | `require_secure_transport=OFF` | `require_secure_transport=0` in param group | `require_ssl=off` flag | `require_secure_transport=OFF` parameter |
+
+**AWS RDS:** `root` is a reserved superuser on RDS — create a separate admin user (`mysqladmin`) at instance creation time. Grant it full privileges via the master user.
+
+**GCP Cloud SQL:** Instance names must be **lowercase** only. The binlog expiry flag is `expire_logs_days` (integer days), not `binlog_expire_logs_seconds`. Set `backupConfiguration.binaryLogEnabled=true` to enable binary logging (it is controlled through backup settings, not a flag).
 
 ## MariaDB differences
 

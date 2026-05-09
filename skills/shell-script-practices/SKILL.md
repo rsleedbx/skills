@@ -268,6 +268,53 @@ and shortens dozens more. Full patterns with before/after: see [line-shortening.
 | `jq -n '{ key: $ENV.var }'` — drop `--arg` chains; validate required fields in bash first | 5+ `--arg` lines in one `jq -n` call | **~23 lines** per heavy builder |
 | `for _v in A B C; do [[ -n "${!_v:-}" ]] \|\| { echo ... kill; }; done` | 4+ parallel `${VAR:?}` guards with same error | **~18 lines** in 6 scripts |
 
+## Parsing INI files — `yq -p ini` then `jq`, not `awk`
+
+When the input is an INI file (e.g. `~/.databrickscfg`, `my.cnf`, `.ini` configs),
+use `yq -p ini` to convert it to JSON/YAML first, then `jq` to extract values.
+Never write complex `awk` to parse INI sections manually.
+
+```bash
+# BAD — brittle awk, hard to read, breaks on edge cases
+ACCOUNT_CONSOLE=$(awk -v p="${ACCOUNT_PROFILE}" \
+  'BEGIN{f=0} /^\[/{f=($0=="["p"]")} f && /^host/{sub(/^host[[:space:]]*=[[:space:]]*/,""); print; exit}' \
+  "${HOME}/.databrickscfg")
+
+# GOOD — yq parses INI into YAML/JSON, jq extracts the field
+ACCOUNT_CONSOLE=$(yq -p ini -oj ".\"${ACCOUNT_PROFILE}\".host" "${HOME}/.databrickscfg")
+```
+
+### yq INI output format
+
+`yq -p ini` without `-o` flag defaults to YAML and prints a warning. Always specify output:
+- `-oy` — YAML (pipe to `yq` for further filtering)
+- `-oj` — JSON (pipe to `jq`)
+- `-ot` — TSV (for simple single-value extractions)
+
+```bash
+# Single value — use -ot (plain text, no quotes)
+HOST=$(yq -p ini -ot ".\"${PROFILE}\".host" ~/.databrickscfg)
+
+# Multiple fields — use -oj and pipe to jq
+yq -p ini -oj ~/.databrickscfg \
+  | jq -r --arg p "${PROFILE}" '.[$p] | "host=\(.host) account=\(.account_id)"'
+```
+
+### INI default section (no header)
+
+`yq -p ini` maps the headerless top-level section to root keys:
+```bash
+# [default] section or top-of-file keys → access at root
+DEFAULT_HOST=$(yq -p ini -ot ".host" ~/.databrickscfg)
+
+# Named section [stan-png-stage-serverless-0]
+PROFILE_HOST=$(yq -p ini -ot '."stan-png-stage-serverless-0".host' ~/.databrickscfg)
+```
+
+### Prerequisites
+
+Add `yq` to the prerequisites loop alongside `jq`. `yq` is installable via `brew install yq`.
+
 ## Cloud CLI wrappers — use `CMD`, not `$()`
 
 See the `shell-cmd-wrapper` skill for the full `CMD` implementation. Key principle: never use `$()` or `2>/dev/null` for REST API calls (`az`, `aws`, `gcloud`, `databricks`, `mysql`, etc.) — they silently swallow errors and can hang on API outages.

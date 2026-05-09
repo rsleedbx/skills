@@ -1,6 +1,6 @@
 ---
 name: database-sqlserver
-description: SQL Server 2019/2022 and Azure SQL — logins vs users (master vs database-level), SA admin account, required LFC roles (db_owner + db_ddladmin), Change Tracking (CT) setup, CDC setup with platform variants (Azure/AWS RDS/GCP Cloud SQL), schema evolution DDL objects, identifier quoting with brackets, sqlcmd conventions (comma port, go separator, -C flag), trustServerCertificate, CT vs CDC mode for LFC. Use when creating SQL Server logins/users, enabling CT or CDC, writing sqlcmd scripts, understanding the login-user architecture, choosing CT vs CDC, or debugging privilege errors.
+description: SQL Server 2019/2022 and Azure SQL — logins vs users (master vs database-level), SA admin account, required LFC roles (db_owner + db_ddladmin), Change Tracking (CT) setup, CDC setup with platform variants (Azure/AWS RDS/GCP Cloud SQL), cloud-specific CDC entrypoints (sp_cdc vs rds_cdc vs gcloudsql_cdc), AWS edition requirement (sqlserver-se for CDC), AWS option groups vs parameter groups, schema evolution DDL objects, identifier quoting with brackets, sqlcmd conventions (comma port, go separator, -C flag), trustServerCertificate, CT vs CDC mode for LFC. Use when creating SQL Server logins/users, enabling CT or CDC across platforms, writing sqlcmd scripts, understanding the login-user architecture, choosing CT vs CDC, or debugging privilege errors.
 ---
 
 # SQL Server — Database Reference
@@ -25,6 +25,41 @@ CREATE LOGIN [lfc_user] WITH PASSWORD = N'<password>';
 USE [<catalog>];
 CREATE USER [lfc_user] FOR LOGIN [lfc_user] WITH DEFAULT_SCHEMA = dbo;
 ```
+
+## Managed-platform login/user gotchas (discovered in mist testing)
+
+Four operations that work on self-hosted SQL Server but are restricted or unreliable on managed cloud platforms:
+
+### 1. `CREATE USER` in master — GCP Cloud SQL (and some Azure tiers)
+
+`sqladmin` (GCP) and some restricted Azure admin accounts lack permission to create users in `master`. The step is **non-critical** — a login in `master` (for authentication) plus a user in the catalog (for authorization) is sufficient for LFC.
+
+```python
+try:
+    exec_sql("IF NOT EXISTS (...) CREATE USER [{u}] FOR LOGIN [{u}] ...")
+except Exception as e:
+    print(f"[warn] skipped USER in master (not critical): {e}")
+```
+
+### 2. `ALTER LOGIN` — Azure SQL Database
+
+`ALTER LOGIN [{user}] WITH PASSWORD = ...` can fail when the admin account doesn't hold `ALTER ANY LOGIN`. Non-critical because `CREATE LOGIN` already set the correct password. Run CREATE and ALTER as separate batches so a failure on ALTER doesn't block the CREATE:
+
+```python
+exec_sql("IF NOT EXISTS (...) CREATE LOGIN [{u}] WITH PASSWORD = N'{pw}';")
+try:
+    exec_sql(f"ALTER LOGIN [{u}] WITH PASSWORD = N'{pw}';")
+except Exception as e:
+    print(f"[warn] ALTER LOGIN skipped (not critical): {e}")
+```
+
+### 3. GCP user propagation delay (~30 s)
+
+When the `sqladmin` user is created via the **GCP Cloud SQL Users API** (not T-SQL), there is a ~30 s propagation delay before the user can authenticate. LFC users created directly via `CREATE LOGIN` (T-SQL) are not affected — they are available immediately.
+
+### 4. Username must start with a letter
+
+SQL Server login and user names must begin with an alphabetic character. Names starting with digits or symbols produce a syntax error at `CREATE LOGIN`. Validate before running setup.
 
 ## SA login: system administrator
 
@@ -78,6 +113,37 @@ ALTER TABLE [dbo].[intpk] ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = O
 CDC requires `autocommit=True`. Use the portable multi-platform ladder (one script works across Azure SQL, GCP Cloud SQL, AWS RDS). CDC auto-falls back to CT on Express/Web editions — always verify via `sys.databases.is_cdc_enabled`, not the stored proc's exit code.
 
 For the full enable/disable ladders, `SET NOCOUNT ON` requirement, table-level CDC, and auto-fallback code: see [ct-cdc-setup.md](ct-cdc-setup.md).
+
+## Cloud-specific CDC entrypoints
+
+| Platform | CDC enable stored proc | Catalog arg? |
+|----------|----------------------|--------------|
+| On-premise / VM | `EXEC sys.sp_cdc_enable_db` | No |
+| Azure SQL | `EXEC sys.sp_cdc_enable_db` | No |
+| AWS RDS | `EXEC msdb.dbo.rds_cdc_enable_db '<catalog>'` | **Yes** |
+| GCP Cloud SQL | `EXEC msdb.dbo.gcloudsql_cdc_enable_db '<catalog>'` | **Yes** |
+
+AWS and GCP wrappers require the database name as a positional argument. Azure's proc infers the current database. Omitting the catalog arg on AWS/GCP causes a silent no-op or error.
+
+Pass `platform="aws"`, `platform="gcp"`, or `platform="azure"` to `sqlserver_configure()` so it uses the right entrypoint.
+
+## AWS RDS SQL Server: edition and option groups
+
+**Edition required for CDC:** `sqlserver-se` (Standard Edition). Express and Web editions do not support CDC. The forgedb AWS module always uses `sqlserver-se`.
+
+**Option groups (not parameter groups):** SQL Server on RDS uses option groups to enable features like SQL Server Audit and native backup/restore. Parameter groups exist for RDS SQL Server but cover very few tunables — most SQL Server configuration is done via T-SQL, not parameter groups.
+
+```python
+# ensure_option_group pattern (AWS SQL Server)
+rds.create_option_group(
+    OptionGroupName=name,
+    EngineName="sqlserver-se",
+    MajorEngineVersion="15.00",   # from rds_value prefix
+    OptionGroupDescription="forgedb LFC"
+)
+```
+
+**Engine version resolution:** `describe_db_engine_versions(Engine="sqlserver-se", MajorEngineVersion="15.00")` → pick the latest patch string (e.g. `15.00.4345.5`). The `rds_value` in versions.py is the `MajorEngineVersion` prefix (`"15.00"` for 2019, `"16.00"` for 2022), not a full version string.
 
 ## CDC availability: Express/Web editions
 

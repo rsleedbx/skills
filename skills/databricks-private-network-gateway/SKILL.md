@@ -63,6 +63,58 @@ If a hostname resolves to a public IP, PNG will route that traffic over the priv
 
 For VMs with both a public FQDN (local CLI access) and an internal hostname (PNG routing), use the **internal hostname** as the PNG destination.
 
+## Validation rules (API-enforced at request time)
+
+These are rejected immediately by the API — they do **not** reach the provisioner.
+
+### Account & tenant
+- You can only create a PNG on an account you have access to.
+- The subnet must live in **your account's Azure tenant** — cross-tenant subnets are rejected.
+
+### Cloud input shape
+- `azure_cloud_connection.gateway_subnet.resource_id` **must** be set.
+- It must be a valid ARM subnet ID: `/subscriptions/.../virtualNetworks/.../subnets/...`.
+
+### Destinations
+- Every destination must be a `DNS_NAME` type. Raw IPs and the legacy `FQDN` type are rejected.
+- Each value must be a syntactically valid FQDN.
+- Destinations on the system deny list (reserved/blocked names) are rejected.
+
+### Traffic mode
+- `traffic_mode` must be explicitly set to `ALL_TRAFFIC` or `SPECIFIC_DESTINATIONS` — omitting it is not allowed.
+- `ALL_TRAFFIC` + non-empty `destinations` → rejected.
+- `SPECIFIC_DESTINATIONS` + empty `destinations` → rejected.
+
+### Uniqueness within an NCC
+- At most **one** PNG per NCC may use `ALL_TRAFFIC` mode.
+- DNS names must be **unique across all PNGs in the same NCC** (case-insensitive).
+- (PROD-only, rolling out) The same customer subnet cannot back two PNGs in the same NCC.
+- An NCC can hold at most **N PNGs** (default 2 in private preview).
+
+### Updates
+- An empty `update_mask` is not allowed.
+- Only `gateway_name`, `destinations`, `private_dns_resolvers`, and `traffic_mode` can be patched. Any other field in the body (`gateway_id`, `ncc_id`, `account_id`, `cloud_connection`, timestamps, or unknown fields) causes the request to be rejected.
+
+### Routing & lifecycle
+- Requests sent to the wrong region are rejected.
+- An NCC that has attached PNGs cannot be deleted — remove the PNGs first.
+
+---
+
+## Not enforced at the API level (caught only during provisioning)
+
+These pass validation but cause the PNG to stay in `CREATING` / `FAILED` state:
+
+| Condition | Symptom |
+|-----------|---------|
+| Subnet not delegated to `Microsoft.Databricks/workspaces` | PNG stays `CREATING` indefinitely |
+| Subnet region does not match the NCC region | PNG stays `CREATING` / `FAILED` |
+| Subnet in use by another resource, or NSG rules blocking connectivity | PNG stays `CREATING` / `FAILED` |
+
+Always pre-validate these in setup scripts before calling the create API.
+
+---
+
 ## SQL_DNS naming convention for discovery scripts
 
 When a session sources multiple DB setup scripts, each exports its own named variable for the PNG-routable hostname. Using a shared `SQL_DNS` risks the public FQDN being picked up.

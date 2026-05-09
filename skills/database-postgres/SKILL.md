@@ -245,6 +245,27 @@ ALTER ROLE <lfc_user> WITH REPLICATION;   -- succeeds on Azure / on-premise / GC
 GRANT rds_replication TO <lfc_user>;      -- succeeds on AWS RDS (fails silently elsewhere)
 ```
 
+## Cross-platform grant compatibility probe (GCP Cloud SQL)
+
+GCP Cloud SQL requires a `cloudsqlsuperuser` intermediary step before `REPLICATION` can be granted. A portable setup script issues both and uses the results as a platform probe:
+
+```python
+# Step 1: attempt cloudsqlsuperuser grant (GCP-specific; no-op / error on other platforms)
+try:
+    cursor.execute(f"GRANT cloudsqlsuperuser TO {lfc_user}")
+except Exception:
+    pass   # not GCP — continue
+
+# Step 2: run both replication grants (each silently succeeds on the right platform)
+cursor.execute(f"ALTER ROLE {lfc_user} WITH REPLICATION")       # Azure / on-premise / GCP
+try:
+    cursor.execute(f"GRANT rds_replication TO {lfc_user}")      # AWS RDS
+except Exception:
+    pass
+```
+
+The sequential pattern — try `cloudsqlsuperuser`, then try both replication grants — works on all three platforms without any `IF`/platform-detection logic in the caller.
+
 ## Test tables: intpk and dtix (PostgreSQL canonical DDL)
 
 From the lakeflow_connect reference implementation (`postgres/02_postgres_configure.sh`):
